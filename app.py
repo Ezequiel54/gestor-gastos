@@ -27,26 +27,21 @@ if not st.session_state.autenticado:
             st.error("PIN incorrecto.")
     st.stop() 
 
-# --- 3. CONFIGURACIÓN DE BASE DE DATOS SQLITE (Actualizada con Ingresos) ---
+# --- 3. CONFIGURACIÓN DE BASE DE DATOS SQLITE ---
 def init_db():
     conn = sqlite3.connect('mis_gastos.db')
     c = conn.cursor()
-    
-    # Tabla de gastos
     c.execute('''CREATE TABLE IF NOT EXISTS gastos
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT, monto REAL, categoria TEXT)''')
     
-    # Verificación de columna 'fecha'
     c.execute("PRAGMA table_info(gastos)")
     columnas = [columna[1] for columna in c.fetchall()]
     if 'fecha' not in columnas:
         c.execute("ALTER TABLE gastos ADD COLUMN fecha TEXT DEFAULT ''")
         
-    # Nueva tabla para guardar el ingreso mensual
     c.execute('''CREATE TABLE IF NOT EXISTS configuracion
                  (id INTEGER PRIMARY KEY, ingreso_mensual REAL)''')
     
-    # Si la tabla de configuración está vacía, le pone 0 de arranque
     c.execute("SELECT COUNT(*) FROM configuracion")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO configuracion (id, ingreso_mensual) VALUES (1, 0.0)")
@@ -109,9 +104,7 @@ st.title("💰 Gestor de Gastos Diarios")
 
 st.sidebar.header("Tus Finanzas")
 
-# Carga el ingreso guardado en la base de datos
 ingreso_guardado = cargar_ingreso()
-
 ingreso_mensual = st.sidebar.number_input(
     "Ingreso Mensual ($)", 
     min_value=0.0, 
@@ -120,9 +113,41 @@ ingreso_mensual = st.sidebar.number_input(
     format="%f"
 )
 
-# Si modificás el número en la pantalla, se guarda instantáneamente
 if ingreso_mensual != ingreso_guardado:
     guardar_ingreso(ingreso_mensual)
+
+st.sidebar.markdown("---")
+
+# Carga de gastos y creación del filtro mensual
+df = cargar_gastos()
+df_mostrar = df.copy()
+
+if not df.empty:
+    # Convertir la columna fecha de texto a formato fecha real para poder extraer el mes
+    df['fecha_dt'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y', errors='coerce')
+    
+    # Rellenar fechas vacías (de gastos viejos) con la fecha de hoy para que no rompa el filtro
+    df['fecha_dt'] = df['fecha_dt'].fillna(datetime.utcnow() - timedelta(hours=3))
+    
+    # Diccionario para traducir los meses al español
+    nombres_meses = {1: 'Enero', 2: 'Febrero', 3: 'Marzo', 4: 'Abril', 5: 'Mayo', 6: 'Junio',
+                     7: 'Julio', 8: 'Agosto', 9: 'Septiembre', 10: 'Octubre', 11: 'Noviembre', 12: 'Diciembre'}
+    
+    # Crear una nueva columna combinando el mes y el año (ej: "Agosto 2026")
+    df['Mes_Anio'] = df['fecha_dt'].dt.month.map(nombres_meses) + " " + df['fecha_dt'].dt.year.astype(str)
+    
+    # Ordenar cronológicamente (más nuevos arriba)
+    df = df.sort_values(by='fecha_dt', ascending=False)
+    
+    # Crear la lista de meses únicos que existen en la base de datos
+    meses_disponibles = df['Mes_Anio'].unique().tolist()
+    
+    # Mostrar el selector en el panel lateral
+    mes_seleccionado = st.sidebar.selectbox("📅 Historial de gastos:", meses_disponibles)
+    
+    # Filtrar la tabla para mostrar solo los datos del mes elegido
+    df_mostrar = df[df['Mes_Anio'] == mes_seleccionado]
+
 
 st.sidebar.markdown("---")
 if st.sidebar.button("Limpiar todos los gastos"):
@@ -170,17 +195,20 @@ if st.button("Procesar Gastos", type="primary"):
             
             guardar_gastos(nuevos_gastos)
             st.success("¡Gastos procesados y guardados en la base de datos!")
+            st.rerun()
             
         except Exception as e:
             st.error(f"Error al procesar con Gemini: {e}")
 
-# --- 6. VISUALIZACIÓN DE RESULTADOS ---
-df = cargar_gastos()
-monto_total_gastos = float(df["monto"].sum()) if not df.empty else 0.0
+# --- 6. VISUALIZACIÓN DE RESULTADOS FILTRADOS ---
+monto_total_gastos = float(df_mostrar["monto"].sum()) if not df_mostrar.empty else 0.0
 saldo_restante = float(ingreso_mensual) - monto_total_gastos
 
 st.markdown("---")
-st.subheader("💵 Balance Actual")
+if not df.empty:
+    st.subheader(f"💵 Balance: {mes_seleccionado}")
+else:
+    st.subheader("💵 Balance Actual")
 
 col_met1, col_met2, col_met3 = st.columns(3)
 col_met1.metric(label="Ingreso Mensual", value=f"${ingreso_mensual:,.2f}")
@@ -192,13 +220,13 @@ col_met3.metric(
     delta=f"${saldo_restante:,.2f}", delta_color=color_saldo
 )
 
-if not df.empty:
+if not df_mostrar.empty:
     st.markdown("---")
     col1, col2 = st.columns([1, 1])
 
     with col1:
         st.subheader("📊 Distribución por Categoría")
-        df_agrupado = df.groupby("categoria", as_index=False)["monto"].sum()
+        df_agrupado = df_mostrar.groupby("categoria", as_index=False)["monto"].sum()
         df_agrupado = df_agrupado.sort_values(by=["monto"], ascending=False)
         fig = px.pie(
             df_agrupado, values="monto", names="categoria", hole=0.4,
@@ -212,8 +240,9 @@ if not df.empty:
 
     with col2:
         st.subheader("📋 Detalle de Gastos")
+        # Mostramos solo las columnas relevantes y ocultamos las de cálculo interno
         st.dataframe(
-            df,
+            df_mostrar[['fecha', 'item', 'monto', 'categoria']],
             column_config={
                 "fecha": "Fecha",
                 "item": "Concepto",
