@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 import re
+import io
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Finanzas KOVA", page_icon="💰", layout="wide")
@@ -57,6 +58,10 @@ def init_db():
     columnas = [columna[1] for columna in c.fetchall()]
     if 'fecha' not in columnas:
         c.execute("ALTER TABLE gastos ADD COLUMN fecha TEXT DEFAULT ''")
+    
+    # Agrega la columna descripción si no existe
+    if 'descripcion' not in columnas:
+        c.execute("ALTER TABLE gastos ADD COLUMN descripcion TEXT DEFAULT ''")
         
     c.execute('''CREATE TABLE IF NOT EXISTS configuracion
                  (id INTEGER PRIMARY KEY, ingreso_mensual REAL)''')
@@ -85,7 +90,7 @@ def guardar_ingreso(monto):
 
 def cargar_gastos():
     conn = sqlite3.connect('mis_gastos.db')
-    df = pd.read_sql_query("SELECT fecha, item, monto, categoria FROM gastos", conn)
+    df = pd.read_sql_query("SELECT fecha, item, descripcion, monto, categoria FROM gastos", conn)
     conn.close()
     return df
 
@@ -95,8 +100,8 @@ def guardar_gastos(gastos_lista):
     fecha_actual = (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y")
     
     for g in gastos_lista:
-        c.execute("INSERT INTO gastos (item, monto, categoria, fecha) VALUES (?, ?, ?, ?)", 
-                  (g['item'], g['monto'], g['categoria'], fecha_actual))
+        c.execute("INSERT INTO gastos (item, monto, categoria, fecha, descripcion) VALUES (?, ?, ?, ?, ?)", 
+                  (g['item'], g['monto'], g['categoria'], fecha_actual, g['descripcion']))
     conn.commit()
     conn.close()
 
@@ -109,36 +114,57 @@ def limpiar_bd():
 
 init_db()
 
-# --- NUEVO MOTOR DE PROCESAMIENTO LOCAL (Sin IA) ---
-def procesar_texto_local(texto):
-    texto_min = texto.lower()
+# --- PROCESAMIENTO MÚLTIPLE Y CON DESCRIPCIÓN ---
+def procesar_texto_local(texto_multilinea):
+    gastos_procesados = []
     
-    # 1. Extraer el monto ignorando puntos de miles
-    texto_sin_puntos = texto_min.replace('.', '')
-    numeros = re.findall(r'\d+', texto_sin_puntos)
-    monto = float(numeros[0]) if numeros else 0.0
+    # Separa por saltos de línea para procesar varios gastos a la vez
+    lineas = texto_multilinea.split('\n')
     
-    # 2. Extraer el concepto (borra los números del texto original)
-    item = re.sub(r'[\d\.]+', '', texto).strip()
-    if not item:
-        item = "Gasto general"
-    
-    # 3. Diccionario de categorización
-    categorias = {
-        "Alimentos": ["super", "supermercado", "comida", "chino", "coto", "carrefour", "dia", "verduleria", "carniceria", "kiosco", "panaderia", "almuerzo"],
-        "Transporte": ["uber", "sube", "taxi", "bondi", "colectivo", "tren", "nafta", "peaje", "facultad", "viaje"],
-        "Salidas/Ocio": ["boliche", "cine", "bar", "cerveza", "cena", "salida", "joda", "entrada", "recital", "juego", "steam"],
-        "Servicios": ["luz", "gas", "agua", "internet", "telefono", "celular", "edenor", "edesur", "aysa", "netflix", "spotify"],
-        "Impuestos": ["afip", "monotributo", "impuesto", "abl"]
-    }
-    
-    categoria_asignada = "Otros"
-    for cat, palabras in categorias.items():
-        if any(palabra in texto_min for palabra in palabras):
-            categoria_asignada = cat
-            break
+    for linea in lineas:
+        if not linea.strip():
+            continue
             
-    return [{"item": item.capitalize(), "monto": monto, "categoria": categoria_asignada}]
+        # Separa el texto principal de la descripción usando el guion "-"
+        partes = linea.split('-', 1)
+        texto_principal = partes[0].strip()
+        descripcion = partes[1].strip().capitalize() if len(partes) > 1 else ""
+        
+        texto_min = texto_principal.lower()
+        texto_sin_puntos = texto_min.replace('.', '')
+        numeros = re.findall(r'\d+', texto_sin_puntos)
+        
+        if not numeros:
+            continue
+            
+        monto = float(numeros[0])
+        item = re.sub(r'[\d\.]+', '', texto_principal).strip().capitalize()
+        if not item:
+            item = "Gasto general"
+        
+        categorias = {
+            "Alimentos": ["super", "supermercado", "comida", "chino", "coto", "carrefour", "dia", "verduleria", "carniceria", "kiosco", "panaderia", "almuerzo", "chori"],
+            "Transporte": ["uber", "sube", "taxi", "bondi", "colectivo", "tren", "nafta", "peaje", "viaje"],
+            "Salidas/Ocio": ["boliche", "cine", "bar", "cerveza", "cena", "salida", "joda", "entrada", "recital", "juego", "steam", "partido"],
+            "Servicios": ["luz", "gas", "agua", "internet", "telefono", "celular", "edenor", "edesur", "aysa", "netflix", "spotify"],
+            "Educación": ["facultad", "fadu", "uba", "apuntes", "materiales", "cuota"],
+            "Impuestos": ["afip", "monotributo", "impuesto", "abl"]
+        }
+        
+        categoria_asignada = "Otros"
+        for cat, palabras in categorias.items():
+            if any(palabra in texto_min for palabra in palabras):
+                categoria_asignada = cat
+                break
+                
+        gastos_procesados.append({
+            "item": item, 
+            "monto": monto, 
+            "categoria": categoria_asignada,
+            "descripcion": descripcion
+        })
+        
+    return gastos_procesados
 
 # --- INTERFAZ PRINCIPAL ---
 st.title("💰 Gestor de Gastos Diarios")
@@ -175,6 +201,18 @@ if not df.empty:
     
     mes_seleccionado = st.sidebar.selectbox("📅 Historial de gastos:", meses_disponibles)
     df_mostrar = df[df['Mes_Anio'] == mes_seleccionado]
+    
+    # Botón para descargar Excel
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+        df_mostrar[['fecha', 'item', 'descripcion', 'categoria', 'monto']].to_excel(writer, index=False, sheet_name='Gastos')
+    
+    st.sidebar.download_button(
+        label="📥 Exportar mes a Excel",
+        data=buffer.getvalue(),
+        file_name=f"Gastos_{mes_seleccionado.replace(' ', '_')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 st.sidebar.markdown("---")
 if st.sidebar.button("Limpiar todos los gastos"):
@@ -186,24 +224,23 @@ if st.sidebar.button("Cerrar Sesión"):
     st.rerun()
 
 gastos_texto = st.text_area(
-    "Escribí tus gastos del día:",
-    placeholder="Ej: 5000 supermercado",
-    height=100,
+    "Escribí tus gastos (un renglón por gasto):",
+    placeholder="Ej:\n5000 supermercado - mercadería para la semana\n2500 uber - vuelta a casa",
+    height=120,
 )
 
 if st.button("Procesar Gastos", type="primary"):
     if not gastos_texto.strip():
         st.warning("Escribí al menos un gasto para analizar.")
     else:
-        # Se ejecuta localmente en milisegundos sin llamar a ninguna API
         nuevos_gastos = procesar_texto_local(gastos_texto)
         
-        if nuevos_gastos[0]["monto"] > 0:
+        if len(nuevos_gastos) > 0:
             guardar_gastos(nuevos_gastos)
-            st.success("¡Gasto procesado y guardado al instante!")
+            st.success(f"¡{len(nuevos_gastos)} gasto(s) procesado(s) y guardado(s) al instante!")
             st.rerun()
         else:
-            st.error("No se detectó ningún monto numérico en el texto.")
+            st.error("No se detectó ningún monto numérico válido en el texto.")
 
 monto_total_gastos = float(df_mostrar["monto"].sum()) if not df_mostrar.empty else 0.0
 saldo_restante = float(ingreso_mensual) - monto_total_gastos
@@ -248,10 +285,11 @@ if not df_mostrar.empty:
         with st.container(border=True):
             st.subheader("📋 Detalle de Gastos")
             st.dataframe(
-                df_mostrar[['fecha', 'item', 'monto', 'categoria']],
+                df_mostrar[['fecha', 'item', 'descripcion', 'monto', 'categoria']],
                 column_config={
                     "fecha": "Fecha",
                     "item": "Concepto",
+                    "descripcion": "Descripción",
                     "monto": st.column_config.NumberColumn("Monto ($)", format="$%.2f"),
                     "categoria": "Categoría",
                 },
