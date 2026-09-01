@@ -7,10 +7,8 @@ from groq import Groq
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 
-# --- 1. CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Finanzas KOVA", page_icon="💰", layout="wide")
 
-# --- 2. SISTEMA DE LOGIN PRIVADO ---
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
 
@@ -27,7 +25,6 @@ if not st.session_state.autenticado:
             st.error("PIN incorrecto.")
     st.stop() 
 
-# --- 3. CONFIGURACIÓN DE BASE DE DATOS SQLITE ---
 def init_db():
     conn = sqlite3.connect('mis_gastos.db')
     c = conn.cursor()
@@ -90,7 +87,6 @@ def limpiar_bd():
 
 init_db()
 
-# --- 4. ESQUEMA PDANTIC ---
 class Gasto(BaseModel):
     item: str
     monto: float
@@ -99,7 +95,6 @@ class Gasto(BaseModel):
 class ListaGastos(BaseModel):
     gastos: list[Gasto]
 
-# --- 5. INTERFAZ PRINCIPAL ---
 st.title("💰 Gestor de Gastos Diarios")
 
 st.sidebar.header("Tus Finanzas")
@@ -187,7 +182,6 @@ if st.button("Procesar Gastos", type="primary"):
         except Exception as e:
             st.error(f"Error al procesar con Groq: {e}")
 
-# --- 6. VISUALIZACIÓN ---
 monto_total_gastos = float(df_mostrar["monto"].sum()) if not df_mostrar.empty else 0.0
 saldo_restante = float(ingreso_mensual) - monto_total_gastos
 
@@ -235,7 +229,6 @@ if not df_mostrar.empty:
                 "monto": st.column_config.NumberColumn("Monto ($)", format="$%.2f"),
                 "categoria": "Categoría",
             },
-            hide_index=True, use_container_width=True,
-        )
-            hide_index=True, use_container_width=True,
+            hide_index=True, 
+            use_container_width=True,
         )
