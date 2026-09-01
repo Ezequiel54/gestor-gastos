@@ -62,11 +62,10 @@ def init_db():
         c.execute("ALTER TABLE gastos ADD COLUMN fecha TEXT DEFAULT ''")
     if 'descripcion' not in columnas_gastos:
         c.execute("ALTER TABLE gastos ADD COLUMN descripcion TEXT DEFAULT ''")
-    # Nueva columna para gastos innecesarios
     if 'innecesario' not in columnas_gastos:
         c.execute("ALTER TABLE gastos ADD COLUMN innecesario INTEGER DEFAULT 0")
         
-    # --- TABLA DE CONFIGURACIÓN (Ingreso y Ahorro) ---
+    # --- TABLA DE CONFIGURACIÓN ---
     c.execute('''CREATE TABLE IF NOT EXISTS configuracion
                  (id INTEGER PRIMARY KEY, ingreso_mensual REAL)''')
                  
@@ -125,7 +124,7 @@ def limpiar_bd():
 
 init_db()
 
-# --- PROCESAMIENTO MÚLTIPLE CON ETIQUETA "INNECESARIO" ---
+# --- PROCESAMIENTO MÚLTIPLE ---
 def procesar_texto_local(texto_multilinea):
     gastos_procesados = []
     lineas = texto_multilinea.split('\n')
@@ -134,10 +133,7 @@ def procesar_texto_local(texto_multilinea):
         if not linea.strip():
             continue
             
-        # Detecta si se escribió la palabra clave (ignora mayúsculas/minúsculas)
         es_innecesario = 1 if re.search(r'innecesari[oa]s?', linea, re.IGNORECASE) else 0
-        
-        # Limpia la palabra del texto original para que no ensucie la tabla
         linea_limpia = re.sub(r'innecesari[oa]s?', '', linea, flags=re.IGNORECASE).replace('  ', ' ').strip()
             
         partes = linea_limpia.split('-', 1)
@@ -227,7 +223,6 @@ if not df.empty:
     mes_seleccionado = st.sidebar.selectbox("📅 Historial de gastos:", meses_disponibles)
     df_mostrar = df[df['Mes_Anio'] == mes_seleccionado]
     
-    # Adaptar la columna de innecesarios para el excel
     df_excel = df_mostrar.copy()
     df_excel['innecesario'] = df_excel['innecesario'].apply(lambda x: "Sí" if x == 1 else "No")
     
@@ -271,7 +266,17 @@ if st.button("Procesar Gastos", type="primary"):
             st.error("No se detectó ningún monto numérico válido en el texto.")
 
 monto_total_gastos = float(df_mostrar["monto"].sum()) if not df_mostrar.empty else 0.0
-saldo_restante = float(ingreso_mensual) - float(ahorro_mensual) - monto_total_gastos
+
+# --- CÁLCULO INTELIGENTE DEL SALDO Y ALERTA DE AHORROS ---
+presupuesto_gastos = float(ingreso_mensual) - float(ahorro_mensual)
+saldo_restante_raw = presupuesto_gastos - monto_total_gastos
+
+if saldo_restante_raw < 0:
+    saldo_restante = 0.0
+    exceso_ahorros = abs(saldo_restante_raw)
+else:
+    saldo_restante = saldo_restante_raw
+    exceso_ahorros = 0.0
 
 st.markdown("---")
 if not df.empty:
@@ -279,13 +284,17 @@ if not df.empty:
 else:
     st.subheader("💵 Balance Actual")
 
-# Alerta roja si hay gastos innecesarios
+# Alertas visuales
 if not df_mostrar.empty:
+    # 1. Alerta si se metió mano en los ahorros
+    if exceso_ahorros > 0:
+        st.error(f"⚠️ **¡Alerta de Ahorros!** Te pasaste por **${exceso_ahorros:,.2f}** de tu presupuesto disponible y tuviste que consumir parte del dinero que ibas a ahorrar.")
+    
+    # 2. Alerta de gastos innecesarios
     df_innecesarios = df_mostrar[df_mostrar['innecesario'] == 1]
     total_innecesario = float(df_innecesarios['monto'].sum()) if not df_innecesarios.empty else 0.0
-    
     if total_innecesario > 0:
-        st.error(f"🚨 Atención: Este mes llevás tirados **${total_innecesario:,.2f}** en gastos innecesarios.")
+        st.warning(f"🚨 **Atención:** Este mes llevás tirados **${total_innecesario:,.2f}** en gastos innecesarios.")
 
 with st.container(border=True):
     col_met1, col_met2, col_met3, col_met4 = st.columns(4)
@@ -293,10 +302,8 @@ with st.container(border=True):
     col_met2.metric(label="Ahorro Destinado", value=f"${ahorro_mensual:,.2f}")
     col_met3.metric(label="Total Gastado", value=f"${monto_total_gastos:,.2f}")
     
-    color_saldo = "normal" if saldo_restante >= 0 else "inverse"
     col_met4.metric(
-        label="Saldo Real Disponible", value=f"${saldo_restante:,.2f}", 
-        delta=f"${saldo_restante:,.2f}", delta_color=color_saldo
+        label="Saldo Real Disponible", value=f"${saldo_restante:,.2f}"
     )
 
 if not df_mostrar.empty:
@@ -321,7 +328,6 @@ if not df_mostrar.empty:
     with col2:
         with st.container(border=True):
             st.subheader("📋 Detalle de Gastos")
-            # Cambiamos visualmente el 1 y 0 por algo más amigable para leer en la tabla
             df_mostrar['Alerta'] = df_mostrar['innecesario'].apply(lambda x: "⚠️ Sí" if x == 1 else "")
             
             st.dataframe(
