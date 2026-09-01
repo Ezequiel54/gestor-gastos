@@ -1,3 +1,4 @@
+import sqlite3
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -5,80 +6,114 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel
 
+# --- 1. CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="Finanzas KOVA", page_icon="💰", layout="wide")
 
-# 1. Definición del esquema estructurado para Gemini
+# --- 2. SISTEMA DE LOGIN PRIVADO ---
+if "autenticado" not in st.session_state:
+    st.session_state.autenticado = False
+
+if not st.session_state.autenticado:
+    st.title("🔒 Acceso Seguro")
+    st.write("Ingresá tu PIN para acceder al gestor de gastos.")
+    
+    pin_ingresado = st.text_input("PIN de seguridad", type="password")
+    if st.button("Entrar", type="primary"):
+        # Compara lo ingresado con el PIN guardado en los Secrets (por defecto '1234')
+        if pin_ingresado == str(st.secrets.get("APP_PIN", "1234")):
+            st.session_state.autenticado = True
+            st.rerun()
+        else:
+            st.error("PIN incorrecto.")
+            
+    # El st.stop() es clave: frena la carga del resto del código si no estás logueado
+    st.stop() 
+
+# --- A PARTIR DE ACÁ, LA APP SOLO SE EJECUTA SI INICIASTE SESIÓN ---
+
+# --- 3. CONFIGURACIÓN DE BASE DE DATOS SQLITE ---
+def init_db():
+    conn = sqlite3.connect('mis_gastos.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS gastos
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT, monto REAL, categoria TEXT)''')
+    conn.commit()
+    conn.close()
+
+def cargar_gastos():
+    conn = sqlite3.connect('mis_gastos.db')
+    df = pd.read_sql_query("SELECT item, monto, categoria FROM gastos", conn)
+    conn.close()
+    return df
+
+def guardar_gastos(gastos_lista):
+    conn = sqlite3.connect('mis_gastos.db')
+    c = conn.cursor()
+    for g in gastos_lista:
+        c.execute("INSERT INTO gastos (item, monto, categoria) VALUES (?, ?, ?)", (g['item'], g['monto'], g['categoria']))
+    conn.commit()
+    conn.close()
+
+def limpiar_bd():
+    conn = sqlite3.connect('mis_gastos.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM gastos")
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# --- 4. ESQUEMA ESTRUCTURADO PARA GEMINI ---
 class Gasto(BaseModel):
     item: str
     monto: float
     categoria: str
 
-
 class ListaGastos(BaseModel):
     gastos: list[Gasto]
 
+# --- 5. INTERFAZ PRINCIPAL ---
+st.title("💰 Gestor de Gastos Diarios")
 
-# 2. Configuración de la página
-st.set_page_config(
-    page_title="Gestor de Gastos IA", page_icon="💰", layout="wide"
+# Panel lateral simplificado (Sin API Key)
+st.sidebar.header("Tus Finanzas")
+ingreso_mensual = st.sidebar.number_input(
+    "Ingreso Mensual ($)", min_value=0.0, value=0.0, step=10000.0, format="%f"
 )
-
-st.title("💰 Gestor de Gastos Diarios con Gemini")
-st.write(
-    "Ingresá tus gastos en texto libre y la IA los clasificará automáticamente."
-)
-
-# 3. Sidebar para Configuración e Ingresos
-st.sidebar.header("Configuración")
-api_key = st.sidebar.text_input("Gemini API Key", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Tus Finanzas")
-ingreso_mensual = st.sidebar.number_input(
-    "Ingreso Mensual ($)", 
-    min_value=0.0, 
-    value=0.0, 
-    step=10000.0,
-    format="%f"
-)
-
-if "tabla_gastos" not in st.session_state:
-    st.session_state.tabla_gastos = pd.DataFrame(
-        columns=["item", "monto", "categoria"]
-    )
-
 if st.sidebar.button("Limpiar todos los gastos"):
-    st.session_state.tabla_gastos = pd.DataFrame(
-        columns=["item", "monto", "categoria"]
-    )
+    limpiar_bd()
+    st.rerun()
+    
+if st.sidebar.button("Cerrar Sesión"):
+    st.session_state.autenticado = False
     st.rerun()
 
-# 4. Formulario de ingreso de texto
 gastos_texto = st.text_area(
     "Escribí tus gastos del día:",
-    placeholder="Ej: Cobré y gasté $15.000 en el súper, $3.200 en la SUBE y $8.500 comiendo una pizza.",
+    placeholder="Ej: Gasté $15.000 en el súper, $3.200 en transporte y $8.500 en una cena.",
     height=100,
 )
 
 if st.button("Procesar Gastos", type="primary"):
-    if not api_key:
-        st.error("Por favor ingresá tu Gemini API Key en el menú lateral.")
-    elif not gastos_texto.strip():
+    if not gastos_texto.strip():
         st.warning("Escribí al menos un gasto para analizar.")
     else:
         try:
+            # Lee la API Key oculta directamente desde Streamlit Secrets
+            api_key = st.secrets["GEMINI_API_KEY"]
             client = genai.Client(api_key=api_key)
-
+            
             prompt = f"""
             Analiza el siguiente texto e identifica todos los gastos realizados.
             Extrae el nombre del ítem/concepto, el monto numérico en formato flotante, 
-            y clasifícalo en una categoría lógica (ej: Alimentos, Transporte, Salidas/Ocio, Servicios, Salud, Impuestos, Otros).
-
-            Texto a analizar:
-            "{gastos_texto}"
+            y clasifícalo en una categoría lógica (ej: Alimentos, Transporte, Salidas/Ocio, Servicios, Impuestos, Otros).
+            Texto a analizar: "{gastos_texto}"
             """
-
+            
             response = client.models.generate_content(
-               model="gemini-3.6-flash",
+                model="gemini-1.5-flash",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
@@ -86,24 +121,19 @@ if st.button("Procesar Gastos", type="primary"):
                     temperature=0.1,
                 ),
             )
-
-            # Corrección para Pylance: asegurar que el texto sea un string
+            
             texto_respuesta = str(response.text) if response.text else "{}"
             datos_gemini = ListaGastos.model_validate_json(texto_respuesta)
-            
             nuevos_gastos = [gasto.model_dump() for gasto in datos_gemini.gastos]
-            df_nuevos = pd.DataFrame(nuevos_gastos)
-
-            st.session_state.tabla_gastos = pd.concat(
-                [st.session_state.tabla_gastos, df_nuevos], ignore_index=True
-            )
-            st.success("¡Gastos procesados e incorporados con éxito!")
-
+            
+            guardar_gastos(nuevos_gastos)
+            st.success("¡Gastos procesados y guardados en la base de datos!")
+            
         except Exception as e:
             st.error(f"Error al procesar con Gemini: {e}")
 
-# 5. Visualización de Balances y Resultados
-df = st.session_state.tabla_gastos
+# --- 6. VISUALIZACIÓN DE RESULTADOS ---
+df = cargar_gastos()
 monto_total_gastos = float(df["monto"].sum()) if not df.empty else 0.0
 saldo_restante = float(ingreso_mensual) - monto_total_gastos
 
@@ -116,33 +146,24 @@ col_met2.metric(label="Total Gastado", value=f"${monto_total_gastos:,.2f}")
 
 color_saldo = "normal" if saldo_restante >= 0 else "inverse"
 col_met3.metric(
-    label="Saldo Disponible", 
-    value=f"${saldo_restante:,.2f}", 
-    delta=f"${saldo_restante:,.2f}", 
-    delta_color=color_saldo
+    label="Saldo Disponible", value=f"${saldo_restante:,.2f}", 
+    delta=f"${saldo_restante:,.2f}", delta_color=color_saldo
 )
 
-st.markdown("---")
-
 if not df.empty:
+    st.markdown("---")
     col1, col2 = st.columns([1, 1])
 
     with col1:
         st.subheader("📊 Distribución por Categoría")
-        # Corrección para Pylance: usar lista en el parámetro 'by'
         df_agrupado = df.groupby("categoria", as_index=False)["monto"].sum()
         df_agrupado = df_agrupado.sort_values(by=["monto"], ascending=False)
-
         fig = px.pie(
-            df_agrupado,
-            values="monto",
-            names="categoria",
-            hole=0.4,
+            df_agrupado, values="monto", names="categoria", hole=0.4,
             color_discrete_sequence=px.colors.qualitative.Pastel,
         )
         fig.update_traces(
-            textposition="inside",
-            textinfo="percent+label",
+            textposition="inside", textinfo="percent+label",
             hovertemplate="%{label}: $%{value:,.2f}<br>%{percent}",
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -153,11 +174,8 @@ if not df.empty:
             df,
             column_config={
                 "item": "Concepto",
-                "monto": st.column_config.NumberColumn(
-                    "Monto ($)", format="$%.2f"
-                ),
+                "monto": st.column_config.NumberColumn("Monto ($)", format="$%.2f"),
                 "categoria": "Categoría",
             },
-            hide_index=True,
-            use_container_width=True,
+            hide_index=True, use_container_width=True,
         )
