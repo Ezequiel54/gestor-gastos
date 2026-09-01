@@ -27,25 +27,50 @@ if not st.session_state.autenticado:
             st.error("PIN incorrecto.")
     st.stop() 
 
-# --- 3. CONFIGURACIÓN DE BASE DE DATOS SQLITE (Actualizada con Fecha) ---
+# --- 3. CONFIGURACIÓN DE BASE DE DATOS SQLITE (Actualizada con Ingresos) ---
 def init_db():
     conn = sqlite3.connect('mis_gastos.db')
     c = conn.cursor()
+    
+    # Tabla de gastos
     c.execute('''CREATE TABLE IF NOT EXISTS gastos
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT, monto REAL, categoria TEXT)''')
     
-    # Verifica si la columna 'fecha' existe; si no, la agrega para no romper bases viejas
+    # Verificación de columna 'fecha'
     c.execute("PRAGMA table_info(gastos)")
     columnas = [columna[1] for columna in c.fetchall()]
     if 'fecha' not in columnas:
         c.execute("ALTER TABLE gastos ADD COLUMN fecha TEXT DEFAULT ''")
         
+    # Nueva tabla para guardar el ingreso mensual
+    c.execute('''CREATE TABLE IF NOT EXISTS configuracion
+                 (id INTEGER PRIMARY KEY, ingreso_mensual REAL)''')
+    
+    # Si la tabla de configuración está vacía, le pone 0 de arranque
+    c.execute("SELECT COUNT(*) FROM configuracion")
+    if c.fetchone()[0] == 0:
+        c.execute("INSERT INTO configuracion (id, ingreso_mensual) VALUES (1, 0.0)")
+        
+    conn.commit()
+    conn.close()
+
+def cargar_ingreso():
+    conn = sqlite3.connect('mis_gastos.db')
+    c = conn.cursor()
+    c.execute("SELECT ingreso_mensual FROM configuracion WHERE id=1")
+    resultado = c.fetchone()
+    conn.close()
+    return resultado[0] if resultado else 0.0
+
+def guardar_ingreso(monto):
+    conn = sqlite3.connect('mis_gastos.db')
+    c = conn.cursor()
+    c.execute("UPDATE configuracion SET ingreso_mensual = ? WHERE id=1", (monto,))
     conn.commit()
     conn.close()
 
 def cargar_gastos():
     conn = sqlite3.connect('mis_gastos.db')
-    # Traemos la fecha primero para que aparezca al inicio de la tabla
     df = pd.read_sql_query("SELECT fecha, item, monto, categoria FROM gastos", conn)
     conn.close()
     return df
@@ -53,8 +78,6 @@ def cargar_gastos():
 def guardar_gastos(gastos_lista):
     conn = sqlite3.connect('mis_gastos.db')
     c = conn.cursor()
-    
-    # Calculamos la fecha actual en Argentina (UTC - 3 horas)
     fecha_actual = (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y")
     
     for g in gastos_lista:
@@ -85,9 +108,21 @@ class ListaGastos(BaseModel):
 st.title("💰 Gestor de Gastos Diarios")
 
 st.sidebar.header("Tus Finanzas")
+
+# Carga el ingreso guardado en la base de datos
+ingreso_guardado = cargar_ingreso()
+
 ingreso_mensual = st.sidebar.number_input(
-    "Ingreso Mensual ($)", min_value=0.0, value=0.0, step=10000.0, format="%f"
+    "Ingreso Mensual ($)", 
+    min_value=0.0, 
+    value=float(ingreso_guardado), 
+    step=10000.0, 
+    format="%f"
 )
+
+# Si modificás el número en la pantalla, se guarda instantáneamente
+if ingreso_mensual != ingreso_guardado:
+    guardar_ingreso(ingreso_mensual)
 
 st.sidebar.markdown("---")
 if st.sidebar.button("Limpiar todos los gastos"):
