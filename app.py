@@ -2,17 +2,14 @@ import sqlite3
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from google import genai
-from google.genai import types
-from pydantic import BaseModel
+import re
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="Finanzas KOVA", page_icon="💰", layout="wide")
 
-# --- CSS: ESTILO UI/UX "VICTOR GAS" ---
+# --- CSS: ESTILO UI/UX ---
 st.markdown("""
     <style>
-        /* Tarjetas con bordes redondeados y sombras suaves */
         div[data-testid="stVerticalBlock"] > div[style*="border"] {
             border-radius: 16px !important;
             border: 1px solid #E5E7EB !important;
@@ -20,7 +17,6 @@ st.markdown("""
             padding: 16px;
             background-color: #FFFFFF;
         }
-        /* Botones principales estilo marca */
         .stButton>button {
             border-radius: 12px;
             font-weight: 600;
@@ -113,14 +109,38 @@ def limpiar_bd():
 
 init_db()
 
-class Gasto(BaseModel):
-    item: str
-    monto: float
-    categoria: str
+# --- NUEVO MOTOR DE PROCESAMIENTO LOCAL (Sin IA) ---
+def procesar_texto_local(texto):
+    texto_min = texto.lower()
+    
+    # 1. Extraer el monto ignorando puntos de miles
+    texto_sin_puntos = texto_min.replace('.', '')
+    numeros = re.findall(r'\d+', texto_sin_puntos)
+    monto = float(numeros[0]) if numeros else 0.0
+    
+    # 2. Extraer el concepto (borra los números del texto original)
+    item = re.sub(r'[\d\.]+', '', texto).strip()
+    if not item:
+        item = "Gasto general"
+    
+    # 3. Diccionario de categorización
+    categorias = {
+        "Alimentos": ["super", "supermercado", "comida", "chino", "coto", "carrefour", "dia", "verduleria", "carniceria", "kiosco", "panaderia", "almuerzo"],
+        "Transporte": ["uber", "sube", "taxi", "bondi", "colectivo", "tren", "nafta", "peaje", "facultad", "viaje"],
+        "Salidas/Ocio": ["boliche", "cine", "bar", "cerveza", "cena", "salida", "joda", "entrada", "recital", "juego", "steam"],
+        "Servicios": ["luz", "gas", "agua", "internet", "telefono", "celular", "edenor", "edesur", "aysa", "netflix", "spotify"],
+        "Impuestos": ["afip", "monotributo", "impuesto", "abl"]
+    }
+    
+    categoria_asignada = "Otros"
+    for cat, palabras in categorias.items():
+        if any(palabra in texto_min for palabra in palabras):
+            categoria_asignada = cat
+            break
+            
+    return [{"item": item.capitalize(), "monto": monto, "categoria": categoria_asignada}]
 
-class ListaGastos(BaseModel):
-    gastos: list[Gasto]
-
+# --- INTERFAZ PRINCIPAL ---
 st.title("💰 Gestor de Gastos Diarios")
 
 st.sidebar.header("Tus Finanzas")
@@ -167,7 +187,7 @@ if st.sidebar.button("Cerrar Sesión"):
 
 gastos_texto = st.text_area(
     "Escribí tus gastos del día:",
-    placeholder="Ej: Gasté $15.000 en el súper, $3.200 en transporte y $8.500 en una cena.",
+    placeholder="Ej: 5000 supermercado",
     height=100,
 )
 
@@ -175,38 +195,15 @@ if st.button("Procesar Gastos", type="primary"):
     if not gastos_texto.strip():
         st.warning("Escribí al menos un gasto para analizar.")
     else:
-        try:
-            # Volvemos a usar la API Key de Gemini que ya tenías en Streamlit Secrets
-            api_key = st.secrets["GEMINI_API_KEY"]
-            client = genai.Client(api_key=api_key)
-            
-            prompt = f"""
-            Analiza el siguiente texto e identifica todos los gastos realizados.
-            Extrae el nombre del ítem/concepto, el monto numérico en formato flotante, 
-            y clasifícalo en una categoría lógica (ej: Alimentos, Transporte, Salidas/Ocio, Servicios, Impuestos, Otros).
-            Texto a analizar: "{gastos_texto}"
-            """
-            
-            response = client.models.generate_content(
-                model="gemini-1.5-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=ListaGastos,
-                    temperature=0.1,
-                ),
-            )
-            
-            texto_respuesta = str(response.text) if response.text else "{}"
-            datos_gemini = ListaGastos.model_validate_json(texto_respuesta)
-            nuevos_gastos = [gasto.model_dump() for gasto in datos_gemini.gastos]
-            
+        # Se ejecuta localmente en milisegundos sin llamar a ninguna API
+        nuevos_gastos = procesar_texto_local(gastos_texto)
+        
+        if nuevos_gastos[0]["monto"] > 0:
             guardar_gastos(nuevos_gastos)
-            st.success("¡Gastos procesados y guardados con éxito!")
+            st.success("¡Gasto procesado y guardado al instante!")
             st.rerun()
-            
-        except Exception as e:
-            st.error(f"Error al procesar con Gemini. Si dice 503, tocá procesar de nuevo. Detalle: {e}")
+        else:
+            st.error("No se detectó ningún monto numérico en el texto.")
 
 monto_total_gastos = float(df_mostrar["monto"].sum()) if not df_mostrar.empty else 0.0
 saldo_restante = float(ingreso_mensual) - monto_total_gastos
@@ -217,7 +214,6 @@ if not df.empty:
 else:
     st.subheader("💵 Balance Actual")
 
-# Implementación de las tarjetas UI
 with st.container(border=True):
     col_met1, col_met2, col_met3 = st.columns(3)
     col_met1.metric(label="Ingreso Mensual", value=f"${ingreso_mensual:,.2f}")
