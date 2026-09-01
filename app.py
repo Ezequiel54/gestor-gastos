@@ -5,6 +5,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
+from datetime import datetime, timedelta
 
 # --- 1. CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="Finanzas KOVA", page_icon="💰", layout="wide")
@@ -19,38 +20,46 @@ if not st.session_state.autenticado:
     
     pin_ingresado = st.text_input("PIN de seguridad", type="password")
     if st.button("Entrar", type="primary"):
-        # Compara lo ingresado con el PIN guardado en los Secrets (por defecto '1234')
         if pin_ingresado == str(st.secrets.get("APP_PIN", "1234")):
             st.session_state.autenticado = True
             st.rerun()
         else:
             st.error("PIN incorrecto.")
-            
-    # El st.stop() es clave: frena la carga del resto del código si no estás logueado
     st.stop() 
 
-# --- A PARTIR DE ACÁ, LA APP SOLO SE EJECUTA SI INICIASTE SESIÓN ---
-
-# --- 3. CONFIGURACIÓN DE BASE DE DATOS SQLITE ---
+# --- 3. CONFIGURACIÓN DE BASE DE DATOS SQLITE (Actualizada con Fecha) ---
 def init_db():
     conn = sqlite3.connect('mis_gastos.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS gastos
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT, monto REAL, categoria TEXT)''')
+    
+    # Verifica si la columna 'fecha' existe; si no, la agrega para no romper bases viejas
+    c.execute("PRAGMA table_info(gastos)")
+    columnas = [columna[1] for columna in c.fetchall()]
+    if 'fecha' not in columnas:
+        c.execute("ALTER TABLE gastos ADD COLUMN fecha TEXT DEFAULT ''")
+        
     conn.commit()
     conn.close()
 
 def cargar_gastos():
     conn = sqlite3.connect('mis_gastos.db')
-    df = pd.read_sql_query("SELECT item, monto, categoria FROM gastos", conn)
+    # Traemos la fecha primero para que aparezca al inicio de la tabla
+    df = pd.read_sql_query("SELECT fecha, item, monto, categoria FROM gastos", conn)
     conn.close()
     return df
 
 def guardar_gastos(gastos_lista):
     conn = sqlite3.connect('mis_gastos.db')
     c = conn.cursor()
+    
+    # Calculamos la fecha actual en Argentina (UTC - 3 horas)
+    fecha_actual = (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y")
+    
     for g in gastos_lista:
-        c.execute("INSERT INTO gastos (item, monto, categoria) VALUES (?, ?, ?)", (g['item'], g['monto'], g['categoria']))
+        c.execute("INSERT INTO gastos (item, monto, categoria, fecha) VALUES (?, ?, ?, ?)", 
+                  (g['item'], g['monto'], g['categoria'], fecha_actual))
     conn.commit()
     conn.close()
 
@@ -75,7 +84,6 @@ class ListaGastos(BaseModel):
 # --- 5. INTERFAZ PRINCIPAL ---
 st.title("💰 Gestor de Gastos Diarios")
 
-# Panel lateral simplificado (Sin API Key)
 st.sidebar.header("Tus Finanzas")
 ingreso_mensual = st.sidebar.number_input(
     "Ingreso Mensual ($)", min_value=0.0, value=0.0, step=10000.0, format="%f"
@@ -101,7 +109,6 @@ if st.button("Procesar Gastos", type="primary"):
         st.warning("Escribí al menos un gasto para analizar.")
     else:
         try:
-            # Lee la API Key oculta directamente desde Streamlit Secrets
             api_key = st.secrets["GEMINI_API_KEY"]
             client = genai.Client(api_key=api_key)
             
@@ -173,6 +180,7 @@ if not df.empty:
         st.dataframe(
             df,
             column_config={
+                "fecha": "Fecha",
                 "item": "Concepto",
                 "monto": st.column_config.NumberColumn("Monto ($)", format="$%.2f"),
                 "categoria": "Categoría",
