@@ -163,7 +163,7 @@ if st.button("Procesar Gastos", type="primary"):
             """
             
             chat_completion = client.chat.completions.create(
-                model="gemma2-9b-it",
+                model="llama-3.1-8b-instant",
                 messages=[
                     {"role": "system", "content": "Eres un asistente financiero que extrae datos en formato JSON."},
                     {"role": "user", "content": prompt}
