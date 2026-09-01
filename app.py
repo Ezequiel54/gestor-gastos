@@ -51,40 +51,51 @@ if not st.session_state.autenticado:
 def init_db():
     conn = sqlite3.connect('mis_gastos.db')
     c = conn.cursor()
+    
+    # --- TABLA DE GASTOS ---
     c.execute('''CREATE TABLE IF NOT EXISTS gastos
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT, monto REAL, categoria TEXT)''')
     
     c.execute("PRAGMA table_info(gastos)")
-    columnas = [columna[1] for columna in c.fetchall()]
-    if 'fecha' not in columnas:
+    columnas_gastos = [columna[1] for columna in c.fetchall()]
+    if 'fecha' not in columnas_gastos:
         c.execute("ALTER TABLE gastos ADD COLUMN fecha TEXT DEFAULT ''")
-    
-    # Agrega la columna descripción si no existe
-    if 'descripcion' not in columnas:
+    if 'descripcion' not in columnas_gastos:
         c.execute("ALTER TABLE gastos ADD COLUMN descripcion TEXT DEFAULT ''")
         
+    # --- TABLA DE CONFIGURACIÓN (Ingreso y Ahorro) ---
     c.execute('''CREATE TABLE IF NOT EXISTS configuracion
                  (id INTEGER PRIMARY KEY, ingreso_mensual REAL)''')
+                 
+    c.execute("PRAGMA table_info(configuracion)")
+    columnas_conf = [columna[1] for columna in c.fetchall()]
+    # Actualiza la base vieja para agregar la columna de ahorro
+    if 'ahorro_mensual' not in columnas_conf:
+        c.execute("ALTER TABLE configuracion ADD COLUMN ahorro_mensual REAL DEFAULT 0.0")
     
     c.execute("SELECT COUNT(*) FROM configuracion")
     if c.fetchone()[0] == 0:
-        c.execute("INSERT INTO configuracion (id, ingreso_mensual) VALUES (1, 0.0)")
+        c.execute("INSERT INTO configuracion (id, ingreso_mensual, ahorro_mensual) VALUES (1, 0.0, 0.0)")
         
     conn.commit()
     conn.close()
 
-def cargar_ingreso():
+def cargar_configuracion():
     conn = sqlite3.connect('mis_gastos.db')
     c = conn.cursor()
-    c.execute("SELECT ingreso_mensual FROM configuracion WHERE id=1")
+    c.execute("SELECT ingreso_mensual, ahorro_mensual FROM configuracion WHERE id=1")
     resultado = c.fetchone()
     conn.close()
-    return resultado[0] if resultado else 0.0
+    if resultado:
+        ingreso = resultado[0] if resultado[0] else 0.0
+        ahorro = resultado[1] if resultado[1] else 0.0
+        return ingreso, ahorro
+    return 0.0, 0.0
 
-def guardar_ingreso(monto):
+def guardar_configuracion(ingreso, ahorro):
     conn = sqlite3.connect('mis_gastos.db')
     c = conn.cursor()
-    c.execute("UPDATE configuracion SET ingreso_mensual = ? WHERE id=1", (monto,))
+    c.execute("UPDATE configuracion SET ingreso_mensual = ?, ahorro_mensual = ? WHERE id=1", (ingreso, ahorro))
     conn.commit()
     conn.close()
 
@@ -114,18 +125,15 @@ def limpiar_bd():
 
 init_db()
 
-# --- PROCESAMIENTO MÚLTIPLE Y CON DESCRIPCIÓN ---
+# --- PROCESAMIENTO MÚLTIPLE ---
 def procesar_texto_local(texto_multilinea):
     gastos_procesados = []
-    
-    # Separa por saltos de línea para procesar varios gastos a la vez
     lineas = texto_multilinea.split('\n')
     
     for linea in lineas:
         if not linea.strip():
             continue
             
-        # Separa el texto principal de la descripción usando el guion "-"
         partes = linea.split('-', 1)
         texto_principal = partes[0].strip()
         descripcion = partes[1].strip().capitalize() if len(partes) > 1 else ""
@@ -171,7 +179,9 @@ st.title("💰 Gestor de Gastos Diarios")
 
 st.sidebar.header("Tus Finanzas")
 
-ingreso_guardado = cargar_ingreso()
+# Carga de ingresos y ahorros
+ingreso_guardado, ahorro_guardado = cargar_configuracion()
+
 ingreso_mensual = st.sidebar.number_input(
     "Ingreso Mensual ($)", 
     min_value=0.0, 
@@ -180,8 +190,17 @@ ingreso_mensual = st.sidebar.number_input(
     format="%f"
 )
 
-if ingreso_mensual != ingreso_guardado:
-    guardar_ingreso(ingreso_mensual)
+ahorro_mensual = st.sidebar.number_input(
+    "Ahorro Destinado ($)", 
+    min_value=0.0, 
+    value=float(ahorro_guardado), 
+    step=5000.0, 
+    format="%f",
+    help="Dinero que separás y no querés tener disponible para gastar."
+)
+
+if ingreso_mensual != ingreso_guardado or ahorro_mensual != ahorro_guardado:
+    guardar_configuracion(ingreso_mensual, ahorro_mensual)
 
 st.sidebar.markdown("---")
 
@@ -202,7 +221,6 @@ if not df.empty:
     mes_seleccionado = st.sidebar.selectbox("📅 Historial de gastos:", meses_disponibles)
     df_mostrar = df[df['Mes_Anio'] == mes_seleccionado]
     
-    # Botón para descargar Excel
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         df_mostrar[['fecha', 'item', 'descripcion', 'categoria', 'monto']].to_excel(writer, index=False, sheet_name='Gastos')
@@ -243,7 +261,10 @@ if st.button("Procesar Gastos", type="primary"):
             st.error("No se detectó ningún monto numérico válido en el texto.")
 
 monto_total_gastos = float(df_mostrar["monto"].sum()) if not df_mostrar.empty else 0.0
-saldo_restante = float(ingreso_mensual) - monto_total_gastos
+
+# --- CÁLCULO DEL SALDO REAL ---
+# Se le resta al ingreso tanto lo gastado como lo que se guardó para ahorro
+saldo_restante = float(ingreso_mensual) - float(ahorro_mensual) - monto_total_gastos
 
 st.markdown("---")
 if not df.empty:
@@ -252,13 +273,14 @@ else:
     st.subheader("💵 Balance Actual")
 
 with st.container(border=True):
-    col_met1, col_met2, col_met3 = st.columns(3)
-    col_met1.metric(label="Ingreso Mensual", value=f"${ingreso_mensual:,.2f}")
-    col_met2.metric(label="Total Gastado", value=f"${monto_total_gastos:,.2f}")
+    col_met1, col_met2, col_met3, col_met4 = st.columns(4)
+    col_met1.metric(label="Ingreso", value=f"${ingreso_mensual:,.2f}")
+    col_met2.metric(label="Ahorro Destinado", value=f"${ahorro_mensual:,.2f}")
+    col_met3.metric(label="Total Gastado", value=f"${monto_total_gastos:,.2f}")
     
     color_saldo = "normal" if saldo_restante >= 0 else "inverse"
-    col_met3.metric(
-        label="Saldo Disponible", value=f"${saldo_restante:,.2f}", 
+    col_met4.metric(
+        label="Saldo Real Disponible", value=f"${saldo_restante:,.2f}", 
         delta=f"${saldo_restante:,.2f}", delta_color=color_saldo
     )
 
