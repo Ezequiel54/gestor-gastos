@@ -62,6 +62,9 @@ def init_db():
         c.execute("ALTER TABLE gastos ADD COLUMN fecha TEXT DEFAULT ''")
     if 'descripcion' not in columnas_gastos:
         c.execute("ALTER TABLE gastos ADD COLUMN descripcion TEXT DEFAULT ''")
+    # Nueva columna para gastos innecesarios
+    if 'innecesario' not in columnas_gastos:
+        c.execute("ALTER TABLE gastos ADD COLUMN innecesario INTEGER DEFAULT 0")
         
     # --- TABLA DE CONFIGURACIÓN (Ingreso y Ahorro) ---
     c.execute('''CREATE TABLE IF NOT EXISTS configuracion
@@ -69,7 +72,6 @@ def init_db():
                  
     c.execute("PRAGMA table_info(configuracion)")
     columnas_conf = [columna[1] for columna in c.fetchall()]
-    # Actualiza la base vieja para agregar la columna de ahorro
     if 'ahorro_mensual' not in columnas_conf:
         c.execute("ALTER TABLE configuracion ADD COLUMN ahorro_mensual REAL DEFAULT 0.0")
     
@@ -87,9 +89,7 @@ def cargar_configuracion():
     resultado = c.fetchone()
     conn.close()
     if resultado:
-        ingreso = resultado[0] if resultado[0] else 0.0
-        ahorro = resultado[1] if resultado[1] else 0.0
-        return ingreso, ahorro
+        return resultado[0] if resultado[0] else 0.0, resultado[1] if resultado[1] else 0.0
     return 0.0, 0.0
 
 def guardar_configuracion(ingreso, ahorro):
@@ -101,7 +101,7 @@ def guardar_configuracion(ingreso, ahorro):
 
 def cargar_gastos():
     conn = sqlite3.connect('mis_gastos.db')
-    df = pd.read_sql_query("SELECT fecha, item, descripcion, monto, categoria FROM gastos", conn)
+    df = pd.read_sql_query("SELECT fecha, item, descripcion, monto, categoria, innecesario FROM gastos", conn)
     conn.close()
     return df
 
@@ -111,8 +111,8 @@ def guardar_gastos(gastos_lista):
     fecha_actual = (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y")
     
     for g in gastos_lista:
-        c.execute("INSERT INTO gastos (item, monto, categoria, fecha, descripcion) VALUES (?, ?, ?, ?, ?)", 
-                  (g['item'], g['monto'], g['categoria'], fecha_actual, g['descripcion']))
+        c.execute("INSERT INTO gastos (item, monto, categoria, fecha, descripcion, innecesario) VALUES (?, ?, ?, ?, ?, ?)", 
+                  (g['item'], g['monto'], g['categoria'], fecha_actual, g['descripcion'], g['innecesario']))
     conn.commit()
     conn.close()
 
@@ -125,7 +125,7 @@ def limpiar_bd():
 
 init_db()
 
-# --- PROCESAMIENTO MÚLTIPLE ---
+# --- PROCESAMIENTO MÚLTIPLE CON ETIQUETA "INNECESARIO" ---
 def procesar_texto_local(texto_multilinea):
     gastos_procesados = []
     lineas = texto_multilinea.split('\n')
@@ -134,7 +134,13 @@ def procesar_texto_local(texto_multilinea):
         if not linea.strip():
             continue
             
-        partes = linea.split('-', 1)
+        # Detecta si se escribió la palabra clave (ignora mayúsculas/minúsculas)
+        es_innecesario = 1 if re.search(r'innecesari[oa]s?', linea, re.IGNORECASE) else 0
+        
+        # Limpia la palabra del texto original para que no ensucie la tabla
+        linea_limpia = re.sub(r'innecesari[oa]s?', '', linea, flags=re.IGNORECASE).replace('  ', ' ').strip()
+            
+        partes = linea_limpia.split('-', 1)
         texto_principal = partes[0].strip()
         descripcion = partes[1].strip().capitalize() if len(partes) > 1 else ""
         
@@ -155,7 +161,7 @@ def procesar_texto_local(texto_multilinea):
             "Transporte": ["uber", "sube", "taxi", "bondi", "colectivo", "tren", "nafta", "peaje", "viaje"],
             "Salidas/Ocio": ["boliche", "cine", "bar", "cerveza", "cena", "salida", "joda", "entrada", "recital", "juego", "steam", "partido"],
             "Servicios": ["luz", "gas", "agua", "internet", "telefono", "celular", "edenor", "edesur", "aysa", "netflix", "spotify"],
-            "Educación": ["facultad", "fadu", "uba", "apuntes", "materiales", "cuota"],
+            "Educación": ["facultad", "fadu", "uba", "apuntes", "materiales", "cuota", "maqueta"],
             "Impuestos": ["afip", "monotributo", "impuesto", "abl"]
         }
         
@@ -169,7 +175,8 @@ def procesar_texto_local(texto_multilinea):
             "item": item, 
             "monto": monto, 
             "categoria": categoria_asignada,
-            "descripcion": descripcion
+            "descripcion": descripcion,
+            "innecesario": es_innecesario
         })
         
     return gastos_procesados
@@ -179,7 +186,6 @@ st.title("💰 Gestor de Gastos Diarios")
 
 st.sidebar.header("Tus Finanzas")
 
-# Carga de ingresos y ahorros
 ingreso_guardado, ahorro_guardado = cargar_configuracion()
 
 ingreso_mensual = st.sidebar.number_input(
@@ -221,9 +227,13 @@ if not df.empty:
     mes_seleccionado = st.sidebar.selectbox("📅 Historial de gastos:", meses_disponibles)
     df_mostrar = df[df['Mes_Anio'] == mes_seleccionado]
     
+    # Adaptar la columna de innecesarios para el excel
+    df_excel = df_mostrar.copy()
+    df_excel['innecesario'] = df_excel['innecesario'].apply(lambda x: "Sí" if x == 1 else "No")
+    
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df_mostrar[['fecha', 'item', 'descripcion', 'categoria', 'monto']].to_excel(writer, index=False, sheet_name='Gastos')
+        df_excel[['fecha', 'item', 'descripcion', 'categoria', 'monto', 'innecesario']].to_excel(writer, index=False, sheet_name='Gastos')
     
     st.sidebar.download_button(
         label="📥 Exportar mes a Excel",
@@ -243,7 +253,7 @@ if st.sidebar.button("Cerrar Sesión"):
 
 gastos_texto = st.text_area(
     "Escribí tus gastos (un renglón por gasto):",
-    placeholder="Ej:\n5000 supermercado - mercadería para la semana\n2500 uber - vuelta a casa",
+    placeholder="Ej:\n5000 chori en Lanús - innecesario\n15000 materiales fadu - cartones",
     height=120,
 )
 
@@ -261,9 +271,6 @@ if st.button("Procesar Gastos", type="primary"):
             st.error("No se detectó ningún monto numérico válido en el texto.")
 
 monto_total_gastos = float(df_mostrar["monto"].sum()) if not df_mostrar.empty else 0.0
-
-# --- CÁLCULO DEL SALDO REAL ---
-# Se le resta al ingreso tanto lo gastado como lo que se guardó para ahorro
 saldo_restante = float(ingreso_mensual) - float(ahorro_mensual) - monto_total_gastos
 
 st.markdown("---")
@@ -271,6 +278,14 @@ if not df.empty:
     st.subheader(f"💵 Balance: {mes_seleccionado}")
 else:
     st.subheader("💵 Balance Actual")
+
+# Alerta roja si hay gastos innecesarios
+if not df_mostrar.empty:
+    df_innecesarios = df_mostrar[df_mostrar['innecesario'] == 1]
+    total_innecesario = float(df_innecesarios['monto'].sum()) if not df_innecesarios.empty else 0.0
+    
+    if total_innecesario > 0:
+        st.error(f"🚨 Atención: Este mes llevás tirados **${total_innecesario:,.2f}** en gastos innecesarios.")
 
 with st.container(border=True):
     col_met1, col_met2, col_met3, col_met4 = st.columns(4)
@@ -306,14 +321,18 @@ if not df_mostrar.empty:
     with col2:
         with st.container(border=True):
             st.subheader("📋 Detalle de Gastos")
+            # Cambiamos visualmente el 1 y 0 por algo más amigable para leer en la tabla
+            df_mostrar['Alerta'] = df_mostrar['innecesario'].apply(lambda x: "⚠️ Sí" if x == 1 else "")
+            
             st.dataframe(
-                df_mostrar[['fecha', 'item', 'descripcion', 'monto', 'categoria']],
+                df_mostrar[['fecha', 'item', 'descripcion', 'monto', 'categoria', 'Alerta']],
                 column_config={
                     "fecha": "Fecha",
                     "item": "Concepto",
                     "descripcion": "Descripción",
                     "monto": st.column_config.NumberColumn("Monto ($)", format="$%.2f"),
                     "categoria": "Categoría",
+                    "Alerta": "Innecesario"
                 },
                 hide_index=True, 
                 use_container_width=True,
