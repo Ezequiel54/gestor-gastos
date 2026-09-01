@@ -1,9 +1,9 @@
 import sqlite3
+import json
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from google import genai
-from google.genai import types
+from groq import Groq
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 
@@ -90,7 +90,7 @@ def limpiar_bd():
 
 init_db()
 
-# --- 4. ESQUEMA ESTRUCTURADO PARA GEMINI ---
+# --- 4. ESQUEMA PDANTIC ---
 class Gasto(BaseModel):
     item: str
     monto: float
@@ -118,36 +118,22 @@ if ingreso_mensual != ingreso_guardado:
 
 st.sidebar.markdown("---")
 
-# Carga de gastos y creación del filtro mensual
 df = cargar_gastos()
 df_mostrar = df.copy()
 
 if not df.empty:
-    # Convertir la columna fecha de texto a formato fecha real para poder extraer el mes
     df['fecha_dt'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y', errors='coerce')
-    
-    # Rellenar fechas vacías (de gastos viejos) con la fecha de hoy para que no rompa el filtro
     df['fecha_dt'] = df['fecha_dt'].fillna(datetime.utcnow() - timedelta(hours=3))
     
-    # Diccionario para traducir los meses al español
     nombres_meses = {1: 'Enero', 2: 'Febrero', 3: 'Marzo', 4: 'Abril', 5: 'Mayo', 6: 'Junio',
                      7: 'Julio', 8: 'Agosto', 9: 'Septiembre', 10: 'Octubre', 11: 'Noviembre', 12: 'Diciembre'}
     
-    # Crear una nueva columna combinando el mes y el año (ej: "Agosto 2026")
     df['Mes_Anio'] = df['fecha_dt'].dt.month.map(nombres_meses) + " " + df['fecha_dt'].dt.year.astype(str)
-    
-    # Ordenar cronológicamente (más nuevos arriba)
     df = df.sort_values(by='fecha_dt', ascending=False)
-    
-    # Crear la lista de meses únicos que existen en la base de datos
     meses_disponibles = df['Mes_Anio'].unique().tolist()
     
-    # Mostrar el selector en el panel lateral
     mes_seleccionado = st.sidebar.selectbox("📅 Historial de gastos:", meses_disponibles)
-    
-    # Filtrar la tabla para mostrar solo los datos del mes elegido
     df_mostrar = df[df['Mes_Anio'] == mes_seleccionado]
-
 
 st.sidebar.markdown("---")
 if st.sidebar.button("Limpiar todos los gastos"):
@@ -169,38 +155,39 @@ if st.button("Procesar Gastos", type="primary"):
         st.warning("Escribí al menos un gasto para analizar.")
     else:
         try:
-            api_key = st.secrets["GEMINI_API_KEY"]
-            client = genai.Client(api_key=api_key)
+            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
             
             prompt = f"""
             Analiza el siguiente texto e identifica todos los gastos realizados.
             Extrae el nombre del ítem/concepto, el monto numérico en formato flotante, 
             y clasifícalo en una categoría lógica (ej: Alimentos, Transporte, Salidas/Ocio, Servicios, Impuestos, Otros).
+            Devuelve estrictamente un JSON que cumpla con este formato exacto:
+            {{"gastos": [{{"item": "nombre", "monto": 0.0, "categoria": "categoria"}}]}}
+            
             Texto a analizar: "{gastos_texto}"
             """
             
-            response = client.models.generate_content(
-                model="gemini-3.6-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=ListaGastos,
-                    temperature=0.1,
-                ),
+            chat_completion = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": "Eres un asistente financiero que extrae datos en formato JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"}
             )
             
-            texto_respuesta = str(response.text) if response.text else "{}"
+            texto_respuesta = chat_completion.choices[0].message.content
             datos_gemini = ListaGastos.model_validate_json(texto_respuesta)
             nuevos_gastos = [gasto.model_dump() for gasto in datos_gemini.gastos]
             
             guardar_gastos(nuevos_gastos)
-            st.success("¡Gastos procesados y guardados en la base de datos!")
+            st.success("¡Gastos procesados y guardados con éxito!")
             st.rerun()
             
         except Exception as e:
-            st.error(f"Error al procesar con Gemini: {e}")
+            st.error(f"Error al procesar con Groq: {e}")
 
-# --- 6. VISUALIZACIÓN DE RESULTADOS FILTRADOS ---
+# --- 6. VISUALIZACIÓN ---
 monto_total_gastos = float(df_mostrar["monto"].sum()) if not df_mostrar.empty else 0.0
 saldo_restante = float(ingreso_mensual) - monto_total_gastos
 
@@ -240,7 +227,6 @@ if not df_mostrar.empty:
 
     with col2:
         st.subheader("📋 Detalle de Gastos")
-        # Mostramos solo las columnas relevantes y ocultamos las de cálculo interno
         st.dataframe(
             df_mostrar[['fecha', 'item', 'monto', 'categoria']],
             column_config={
@@ -249,5 +235,7 @@ if not df_mostrar.empty:
                 "monto": st.column_config.NumberColumn("Monto ($)", format="$%.2f"),
                 "categoria": "Categoría",
             },
+            hide_index=True, use_container_width=True,
+        )
             hide_index=True, use_container_width=True,
         )
