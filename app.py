@@ -321,8 +321,8 @@ if not df_mostrar.empty:
             )
             st.plotly_chart(fig, use_container_width=True)
 
-with col2:
-    with st.container(border=True):
+    with col2:
+        with st.container(border=True):
             st.subheader("📋 Detalle de Gastos")
             df_mostrar['Alerta'] = df_mostrar['innecesario'].apply(lambda x: "⚠️ Sí" if x == 1 else "")
             
@@ -336,6 +336,6 @@ with col2:
                     "categoria": "Categoría",
                     "Alerta": "Innecesario"
                 },
-                hide_index=True,
+                hide_index=True, 
                 use_container_width=True,
             )
