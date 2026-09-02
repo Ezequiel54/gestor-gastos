@@ -32,35 +32,23 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-if "autenticado" not in st.session_state:
-    st.session_state.autenticado = False
-
-if not st.session_state.autenticado:
-    st.title("🔒 Acceso Seguro")
-    st.write("Ingresá tu PIN para acceder al gestor de gastos.")
-    
-    pin_ingresado = st.text_input("PIN de seguridad", type="password")
-    if st.button("Entrar", type="primary"):
-        if pin_ingresado == str(st.secrets.get("APP_PIN", "1234")):
-            st.session_state.autenticado = True
-            st.rerun()
-        else:
-            st.error("PIN incorrecto.")
-    st.stop() 
-
 # --- CONEXIÓN A SUPABASE (PostgreSQL) ---
 @st.cache_resource
 def get_engine():
     db_url = st.secrets["SUPABASE_URL"]
-    # SQLAlchemy requiere que la url empiece con postgresql://
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
     return sqlalchemy.create_engine(db_url)
 
 engine = get_engine()
 
+# Nombres de meses en español para todo el sistema
+NOMBRES_MESES = {1: 'Enero', 2: 'Febrero', 3: 'Marzo', 4: 'Abril', 5: 'Mayo', 6: 'Junio',
+                 7: 'Julio', 8: 'Agosto', 9: 'Septiembre', 10: 'Octubre', 11: 'Noviembre', 12: 'Diciembre'}
+
 def init_db():
     with engine.connect() as conn:
+        # Tabla de gastos
         conn.execute(sqlalchemy.text('''
             CREATE TABLE IF NOT EXISTS gastos (
                 id SERIAL PRIMARY KEY,
@@ -72,38 +60,67 @@ def init_db():
                 innecesario INTEGER DEFAULT 0
             )
         '''))
+        # Nueva Tabla: Presupuestos Históricos (por mes)
         conn.execute(sqlalchemy.text('''
-            CREATE TABLE IF NOT EXISTS configuracion (
-                id INTEGER PRIMARY KEY,
-                ingreso_mensual REAL,
-                ahorro_mensual REAL DEFAULT 0.0
+            CREATE TABLE IF NOT EXISTS presupuestos_mensuales (
+                mes_anio TEXT PRIMARY KEY,
+                ingreso REAL DEFAULT 0.0,
+                ahorro REAL DEFAULT 0.0
+            )
+        '''))
+        # Nueva Tabla: Diccionario de Categorías
+        conn.execute(sqlalchemy.text('''
+            CREATE TABLE IF NOT EXISTS diccionario_categorias (
+                id SERIAL PRIMARY KEY,
+                categoria TEXT,
+                palabra TEXT
             )
         '''))
         conn.commit()
         
-        res = conn.execute(sqlalchemy.text("SELECT COUNT(*) FROM configuracion WHERE id = 1")).fetchone()
+        # Insertar diccionario por defecto si está vacío
+        res = conn.execute(sqlalchemy.text("SELECT COUNT(*) FROM diccionario_categorias")).fetchone()
         if res[0] == 0:
-            conn.execute(sqlalchemy.text("INSERT INTO configuracion (id, ingreso_mensual, ahorro_mensual) VALUES (1, 0.0, 0.0)"))
+            categorias_default = {
+                "Alimentos": ["super", "supermercado", "comida", "chino", "coto", "carrefour", "dia", "verduleria", "carniceria", "kiosco", "panaderia", "almuerzo", "chori"],
+                "Transporte": ["uber", "sube", "taxi", "bondi", "colectivo", "tren", "nafta", "peaje", "viaje"],
+                "Salidas/Ocio": ["boliche", "cine", "bar", "cerveza", "cena", "salida", "joda", "entrada", "recital", "juego", "steam", "partido"],
+                "Servicios": ["luz", "gas", "agua", "internet", "telefono", "celular", "edenor", "edesur", "aysa", "netflix", "spotify", "hosting"],
+                "Educación": ["facultad", "fadu", "uba", "apuntes", "materiales", "cuota", "maqueta"],
+                "Impuestos": ["afip", "monotributo", "impuesto", "abl"]
+            }
+            for cat, palabras in categorias_default.items():
+                for palabra in palabras:
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO diccionario_categorias (categoria, palabra) VALUES (:cat, :pal)"
+                    ), {"cat": cat, "pal": palabra})
             conn.commit()
 
 init_db()
 
-def cargar_configuracion():
+# --- FUNCIONES DE BASE DE DATOS ---
+def cargar_presupuesto(mes_anio):
     with engine.connect() as conn:
-        res = conn.execute(sqlalchemy.text("SELECT ingreso_mensual, ahorro_mensual FROM configuracion WHERE id=1")).fetchone()
+        res = conn.execute(sqlalchemy.text(
+            "SELECT ingreso, ahorro FROM presupuestos_mensuales WHERE mes_anio = :ma"
+        ), {"ma": mes_anio}).fetchone()
         if res:
-            return float(res[0]) if res[0] is not None else 0.0, float(res[1]) if res[1] is not None else 0.0
+            return float(res[0]), float(res[1])
     return 0.0, 0.0
 
-def guardar_configuracion(ingreso, ahorro):
+def guardar_presupuesto(mes_anio, ingreso, ahorro):
     with engine.connect() as conn:
-        conn.execute(sqlalchemy.text("UPDATE configuracion SET ingreso_mensual = :ing, ahorro_mensual = :ahorro WHERE id=1"),
-                     {"ing": ingreso, "ahorro": ahorro})
+        # Intenta insertar o actualizar (Upsert)
+        conn.execute(sqlalchemy.text('''
+            INSERT INTO presupuestos_mensuales (mes_anio, ingreso, ahorro)
+            VALUES (:ma, :ing, :aho)
+            ON CONFLICT (mes_anio) 
+            DO UPDATE SET ingreso = EXCLUDED.ingreso, ahorro = EXCLUDED.ahorro
+        '''), {"ma": mes_anio, "ing": ingreso, "aho": ahorro})
         conn.commit()
 
 def cargar_gastos():
-    df = pd.read_sql("SELECT fecha, item, descripcion, monto, categoria, innecesario FROM gastos", con=engine)
-    return df
+    return pd.read_sql("SELECT id, fecha, item, descripcion, monto, categoria, innecesario FROM gastos", con=engine)
 
 def guardar_gastos(gastos_lista):
     fecha_actual = (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y")
@@ -113,13 +130,14 @@ def guardar_gastos(gastos_lista):
                 INSERT INTO gastos (item, monto, categoria, fecha, descripcion, innecesario) 
                 VALUES (:item, :monto, :categoria, :fecha, :descripcion, :innecesario)
             """), {
-                "item": g['item'], 
-                "monto": g['monto'], 
-                "categoria": g['categoria'], 
-                "fecha": fecha_actual, 
-                "descripcion": g['descripcion'],
-                "innecesario": g['innecesario']
+                "item": g['item'], "monto": g['monto'], "categoria": g['categoria'], 
+                "fecha": fecha_actual, "descripcion": g['descripcion'], "innecesario": g['innecesario']
             })
+        conn.commit()
+
+def eliminar_gasto(id_gasto):
+    with engine.connect() as conn:
+        conn.execute(sqlalchemy.text("DELETE FROM gastos WHERE id = :id"), {"id": id_gasto})
         conn.commit()
 
 def limpiar_bd():
@@ -127,8 +145,25 @@ def limpiar_bd():
         conn.execute(sqlalchemy.text("DELETE FROM gastos"))
         conn.commit()
 
-# --- PROCESAMIENTO MÚLTIPLE ---
-def procesar_texto_local(texto_multilinea):
+def cargar_diccionario():
+    df_dic = pd.read_sql("SELECT categoria, palabra FROM diccionario_categorias", con=engine)
+    diccionario = {}
+    for _, row in df_dic.iterrows():
+        cat = row['categoria']
+        if cat not in diccionario:
+            diccionario[cat] = []
+        diccionario[cat].append(row['palabra'])
+    return diccionario
+
+def agregar_palabra_diccionario(categoria, palabra):
+    with engine.connect() as conn:
+        conn.execute(sqlalchemy.text(
+            "INSERT INTO diccionario_categorias (categoria, palabra) VALUES (:cat, :pal)"
+        ), {"cat": categoria, "pal": palabra.lower().strip()})
+        conn.commit()
+
+# --- PROCESAMIENTO INTELIGENTE CON DICCIONARIO DINÁMICO ---
+def procesar_texto_local(texto_multilinea, categorias_dinamicas):
     gastos_procesados = []
     lineas = texto_multilinea.split('\n')
     
@@ -144,9 +179,7 @@ def procesar_texto_local(texto_multilinea):
         descripcion = partes[1].strip().capitalize() if len(partes) > 1 else ""
         
         texto_min = texto_principal.lower()
-        texto_sin_puntos = texto_min.replace('.', '')
-        numeros = re.findall(r'\d+', texto_sin_puntos)
-        
+        numeros = re.findall(r'\d+', texto_min.replace('.', ''))
         if not numeros:
             continue
             
@@ -155,99 +188,87 @@ def procesar_texto_local(texto_multilinea):
         if not item:
             item = "Gasto general"
         
-        categorias = {
-            "Alimentos": ["super", "supermercado", "comida", "chino", "coto", "carrefour", "dia", "verduleria", "carniceria", "kiosco", "panaderia", "almuerzo", "chori"],
-            "Transporte": ["uber", "sube", "taxi", "bondi", "colectivo", "tren", "nafta", "peaje", "viaje"],
-            "Salidas/Ocio": ["boliche", "cine", "bar", "cerveza", "cena", "salida", "joda", "entrada", "recital", "juego", "steam", "partido"],
-            "Servicios": ["luz", "gas", "agua", "internet", "telefono", "celular", "edenor", "edesur", "aysa", "netflix", "spotify", "hosting"],
-            "Educación": ["facultad", "fadu", "uba", "apuntes", "materiales", "cuota", "maqueta"],
-            "Impuestos": ["afip", "monotributo", "impuesto", "abl"]
-        }
-        
         categoria_asignada = "Otros"
-        for cat, palabras in categorias.items():
+        for cat, palabras in categorias_dinamicas.items():
             if any(palabra in texto_min for palabra in palabras):
                 categoria_asignada = cat
                 break
                 
         gastos_procesados.append({
-            "item": item, 
-            "monto": monto, 
-            "categoria": categoria_asignada,
-            "descripcion": descripcion,
-            "innecesario": es_innecesario
+            "item": item, "monto": monto, "categoria": categoria_asignada,
+            "descripcion": descripcion, "innecesario": es_innecesario
         })
-        
     return gastos_procesados
+
+# --- LÓGICA DE FECHAS Y DATOS ---
+fecha_hoy = datetime.utcnow() - timedelta(hours=3)
+mes_actual_str = f"{NOMBRES_MESES[fecha_hoy.month]} {fecha_hoy.year}"
+
+df = cargar_gastos()
+
+if not df.empty:
+    df['fecha_dt'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y', errors='coerce')
+    df['fecha_dt'] = df['fecha_dt'].fillna(fecha_hoy)
+    df['Mes_Anio'] = df['fecha_dt'].dt.month.map(NOMBRES_MESES) + " " + df['fecha_dt'].dt.year.astype(str)
+    df = df.sort_values(by='fecha_dt', ascending=False)
+    meses_disponibles = df['Mes_Anio'].unique().tolist()
+    if mes_actual_str not in meses_disponibles:
+        meses_disponibles.insert(0, mes_actual_str)
+else:
+    meses_disponibles = [mes_actual_str]
+    df['Mes_Anio'] = pd.Series(dtype='str')
 
 # --- INTERFAZ PRINCIPAL ---
 st.title("💰 Gestor de Gastos Diarios")
 
+# --- SIDEBAR: HISTORIAL Y EXCEL MAESTRO ---
 st.sidebar.header("Tus Finanzas")
 
-ingreso_guardado, ahorro_guardado = cargar_configuracion()
+mes_seleccionado = st.sidebar.selectbox("📅 Seleccionar Mes:", meses_disponibles)
+
+# Cargar presupuesto específico de este mes
+ingreso_guardado, ahorro_guardado = cargar_presupuesto(mes_seleccionado)
 
 ingreso_mensual = st.sidebar.number_input(
-    "Ingreso Mensual ($)", 
-    min_value=0.0, 
-    value=float(ingreso_guardado), 
-    step=10000.0, 
-    format="%f"
+    f"Ingreso de {mes_seleccionado} ($)", min_value=0.0, 
+    value=float(ingreso_guardado), step=10000.0, format="%f"
 )
-
 ahorro_mensual = st.sidebar.number_input(
-    "Ahorro Destinado ($)", 
-    min_value=0.0, 
-    value=float(ahorro_guardado), 
-    step=5000.0, 
-    format="%f",
-    help="Dinero que separás y no querés tener disponible para gastar."
+    f"Ahorro de {mes_seleccionado} ($)", min_value=0.0, 
+    value=float(ahorro_guardado), step=5000.0, format="%f"
 )
 
 if ingreso_mensual != ingreso_guardado or ahorro_mensual != ahorro_guardado:
-    guardar_configuracion(ingreso_mensual, ahorro_mensual)
+    guardar_presupuesto(mes_seleccionado, ingreso_mensual, ahorro_mensual)
 
 st.sidebar.markdown("---")
 
-df = cargar_gastos()
-df_mostrar = df.copy()
-
+# Excel Maestro (Un archivo, múltiples hojas por mes)
 if not df.empty:
-    df['fecha_dt'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y', errors='coerce')
-    df['fecha_dt'] = df['fecha_dt'].fillna(datetime.utcnow() - timedelta(hours=3))
-    
-    nombres_meses = {1: 'Enero', 2: 'Febrero', 3: 'Marzo', 4: 'Abril', 5: 'Mayo', 6: 'Junio',
-                     7: 'Julio', 8: 'Agosto', 9: 'Septiembre', 10: 'Octubre', 11: 'Noviembre', 12: 'Diciembre'}
-    
-    df['Mes_Anio'] = df['fecha_dt'].dt.month.map(nombres_meses) + " " + df['fecha_dt'].dt.year.astype(str)
-    df = df.sort_values(by='fecha_dt', ascending=False)
-    meses_disponibles = df['Mes_Anio'].unique().tolist()
-    
-    mes_seleccionado = st.sidebar.selectbox("📅 Historial de gastos:", meses_disponibles)
-    df_mostrar = df[df['Mes_Anio'] == mes_seleccionado]
-    
-    df_excel = df_mostrar.copy()
-    df_excel['innecesario'] = df_excel['innecesario'].apply(lambda x: "Sí" if x == 1 else "No")
-    
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df_excel[['fecha', 'item', 'descripcion', 'categoria', 'monto', 'innecesario']].to_excel(writer, index=False, sheet_name='Gastos')
-    
+        for mes_hoja in df['Mes_Anio'].unique():
+            df_hoja = df[df['Mes_Anio'] == mes_hoja].copy()
+            df_hoja['Innecesario'] = df_hoja['innecesario'].apply(lambda x: "Sí" if x == 1 else "No")
+            # Nombre de hoja no puede superar 31 caracteres en Excel
+            nombre_limpio = str(mes_hoja)[:31]
+            df_hoja[['fecha', 'item', 'descripcion', 'categoria', 'monto', 'Innecesario']].to_excel(writer, index=False, sheet_name=nombre_limpio)
+            
     st.sidebar.download_button(
-        label="📥 Exportar mes a Excel",
+        label="📥 Descargar Excel Maestro",
         data=buffer.getvalue(),
-        file_name=f"Gastos_{mes_seleccionado.replace(' ', '_')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        file_name=f"Mis_Finanzas_Master.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help="Descarga todos tus meses organizados en pestañas dentro de un solo archivo Excel."
     )
 
 st.sidebar.markdown("---")
-if st.sidebar.button("Limpiar todos los gastos"):
+if st.sidebar.button("🚨 Limpiar toda la base de datos"):
     limpiar_bd()
     st.rerun()
-    
-if st.sidebar.button("Cerrar Sesión"):
-    st.session_state.autenticado = False
-    st.rerun()
+
+# --- ÁREA PRINCIPAL: CARGA Y HERRAMIENTAS ---
+df_mostrar = df[df['Mes_Anio'] == mes_seleccionado] if not df.empty else df.copy()
 
 gastos_texto = st.text_area(
     "Escribí tus gastos (un renglón por gasto):",
@@ -259,17 +280,42 @@ if st.button("Procesar Gastos", type="primary"):
     if not gastos_texto.strip():
         st.warning("Escribí al menos un gasto para analizar.")
     else:
-        nuevos_gastos = procesar_texto_local(gastos_texto)
-        
+        categorias_db = cargar_diccionario()
+        nuevos_gastos = procesar_texto_local(gastos_texto, categorias_db)
         if len(nuevos_gastos) > 0:
             guardar_gastos(nuevos_gastos)
-            st.success(f"¡{len(nuevos_gastos)} gasto(s) procesado(s) y guardado(s) en la nube!")
+            st.success(f"¡{len(nuevos_gastos)} gasto(s) guardado(s) en {mes_actual_str}!")
             st.rerun()
         else:
             st.error("No se detectó ningún monto numérico válido en el texto.")
 
-monto_total_gastos = float(df_mostrar["monto"].sum()) if not df_mostrar.empty else 0.0
+# --- HERRAMIENTAS AVANZADAS (EXPANDERS) ---
+col_tool1, col_tool2 = st.columns(2)
+with col_tool1:
+    with st.expander("⚙️ Enseñar nueva palabra a una categoría"):
+        cat_elegida = st.selectbox("Categoría:", ["Alimentos", "Transporte", "Salidas/Ocio", "Servicios", "Educación", "Impuestos", "Otros"])
+        nueva_palabra = st.text_input("Nueva palabra clave (ej: mcdonalds):")
+        if st.button("Agregar palabra al sistema"):
+            if nueva_palabra:
+                agregar_palabra_diccionario(cat_elegida, nueva_palabra)
+                st.success(f"Palabra '{nueva_palabra}' asignada a {cat_elegida}.")
+            else:
+                st.warning("Escribí una palabra válida.")
 
+with col_tool2:
+    with st.expander("🗑️ Borrar un gasto mal cargado"):
+        if not df_mostrar.empty:
+            id_a_borrar = st.selectbox("Seleccioná el gasto a eliminar:", df_mostrar['id'].tolist(), 
+                                     format_func=lambda x: f"ID {x} - {df_mostrar[df_mostrar['id']==x]['item'].values[0]} (${df_mostrar[df_mostrar['id']==x]['monto'].values[0]:,.0f})")
+            if st.button("Eliminar permanentemente"):
+                eliminar_gasto(id_a_borrar)
+                st.success("Gasto eliminado.")
+                st.rerun()
+        else:
+            st.info("No hay gastos en este mes para borrar.")
+
+# --- CÁLCULOS DEL MES SELECCIONADO ---
+monto_total_gastos = float(df_mostrar["monto"].sum()) if not df_mostrar.empty else 0.0
 presupuesto_gastos = float(ingreso_mensual) - float(ahorro_mensual)
 saldo_restante_raw = presupuesto_gastos - monto_total_gastos
 
@@ -281,10 +327,7 @@ else:
     exceso_ahorros = 0.0
 
 st.markdown("---")
-if not df.empty:
-    st.subheader(f"💵 Balance: {mes_seleccionado}")
-else:
-    st.subheader("💵 Balance Actual")
+st.subheader(f"💵 Balance: {mes_seleccionado}")
 
 if not df_mostrar.empty:
     if exceso_ahorros > 0:
@@ -326,6 +369,7 @@ if not df_mostrar.empty:
             st.subheader("📋 Detalle de Gastos")
             df_mostrar['Alerta'] = df_mostrar['innecesario'].apply(lambda x: "⚠️ Sí" if x == 1 else "")
             
+            # Formateo visual limpio sin el ID en la tabla principal
             st.dataframe(
                 df_mostrar[['fecha', 'item', 'descripcion', 'monto', 'categoria', 'Alerta']],
                 column_config={
