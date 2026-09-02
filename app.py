@@ -1,7 +1,7 @@
-import sqlite3
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import sqlalchemy
 import re
 import io
 from datetime import datetime, timedelta
@@ -48,81 +48,84 @@ if not st.session_state.autenticado:
             st.error("PIN incorrecto.")
     st.stop() 
 
+# --- CONEXIÓN A SUPABASE (PostgreSQL) ---
+@st.cache_resource
+def get_engine():
+    db_url = st.secrets["SUPABASE_URL"]
+    # SQLAlchemy requiere que la url empiece con postgresql://
+    if db_url.startswith("postgres://"):
+        db_url = db_url.replace("postgres://", "postgresql://", 1)
+    return sqlalchemy.create_engine(db_url)
+
+engine = get_engine()
+
 def init_db():
-    conn = sqlite3.connect('mis_gastos.db')
-    c = conn.cursor()
-    
-    # --- TABLA DE GASTOS ---
-    c.execute('''CREATE TABLE IF NOT EXISTS gastos
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT, monto REAL, categoria TEXT)''')
-    
-    c.execute("PRAGMA table_info(gastos)")
-    columnas_gastos = [columna[1] for columna in c.fetchall()]
-    if 'fecha' not in columnas_gastos:
-        c.execute("ALTER TABLE gastos ADD COLUMN fecha TEXT DEFAULT ''")
-    if 'descripcion' not in columnas_gastos:
-        c.execute("ALTER TABLE gastos ADD COLUMN descripcion TEXT DEFAULT ''")
-    if 'innecesario' not in columnas_gastos:
-        c.execute("ALTER TABLE gastos ADD COLUMN innecesario INTEGER DEFAULT 0")
+    with engine.connect() as conn:
+        conn.execute(sqlalchemy.text('''
+            CREATE TABLE IF NOT EXISTS gastos (
+                id SERIAL PRIMARY KEY,
+                item TEXT,
+                monto REAL,
+                categoria TEXT,
+                fecha TEXT DEFAULT '',
+                descripcion TEXT DEFAULT '',
+                innecesario INTEGER DEFAULT 0
+            )
+        '''))
+        conn.execute(sqlalchemy.text('''
+            CREATE TABLE IF NOT EXISTS configuracion (
+                id INTEGER PRIMARY KEY,
+                ingreso_mensual REAL,
+                ahorro_mensual REAL DEFAULT 0.0
+            )
+        '''))
+        conn.commit()
         
-    # --- TABLA DE CONFIGURACIÓN ---
-    c.execute('''CREATE TABLE IF NOT EXISTS configuracion
-                 (id INTEGER PRIMARY KEY, ingreso_mensual REAL)''')
-                 
-    c.execute("PRAGMA table_info(configuracion)")
-    columnas_conf = [columna[1] for columna in c.fetchall()]
-    if 'ahorro_mensual' not in columnas_conf:
-        c.execute("ALTER TABLE configuracion ADD COLUMN ahorro_mensual REAL DEFAULT 0.0")
-    
-    c.execute("SELECT COUNT(*) FROM configuracion")
-    if c.fetchone()[0] == 0:
-        c.execute("INSERT INTO configuracion (id, ingreso_mensual, ahorro_mensual) VALUES (1, 0.0, 0.0)")
-        
-    conn.commit()
-    conn.close()
+        res = conn.execute(sqlalchemy.text("SELECT COUNT(*) FROM configuracion WHERE id = 1")).fetchone()
+        if res[0] == 0:
+            conn.execute(sqlalchemy.text("INSERT INTO configuracion (id, ingreso_mensual, ahorro_mensual) VALUES (1, 0.0, 0.0)"))
+            conn.commit()
+
+init_db()
 
 def cargar_configuracion():
-    conn = sqlite3.connect('mis_gastos.db')
-    c = conn.cursor()
-    c.execute("SELECT ingreso_mensual, ahorro_mensual FROM configuracion WHERE id=1")
-    resultado = c.fetchone()
-    conn.close()
-    if resultado:
-        return resultado[0] if resultado[0] else 0.0, resultado[1] if resultado[1] else 0.0
+    with engine.connect() as conn:
+        res = conn.execute(sqlalchemy.text("SELECT ingreso_mensual, ahorro_mensual FROM configuracion WHERE id=1")).fetchone()
+        if res:
+            return float(res[0]) if res[0] is not None else 0.0, float(res[1]) if res[1] is not None else 0.0
     return 0.0, 0.0
 
 def guardar_configuracion(ingreso, ahorro):
-    conn = sqlite3.connect('mis_gastos.db')
-    c = conn.cursor()
-    c.execute("UPDATE configuracion SET ingreso_mensual = ?, ahorro_mensual = ? WHERE id=1", (ingreso, ahorro))
-    conn.commit()
-    conn.close()
+    with engine.connect() as conn:
+        conn.execute(sqlalchemy.text("UPDATE configuracion SET ingreso_mensual = :ing, ahorro_mensual = :ahorro WHERE id=1"),
+                     {"ing": ingreso, "ahorro": ahorro})
+        conn.commit()
 
 def cargar_gastos():
-    conn = sqlite3.connect('mis_gastos.db')
-    df = pd.read_sql_query("SELECT fecha, item, descripcion, monto, categoria, innecesario FROM gastos", conn)
-    conn.close()
+    df = pd.read_sql("SELECT fecha, item, descripcion, monto, categoria, innecesario FROM gastos", con=engine)
     return df
 
 def guardar_gastos(gastos_lista):
-    conn = sqlite3.connect('mis_gastos.db')
-    c = conn.cursor()
     fecha_actual = (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y")
-    
-    for g in gastos_lista:
-        c.execute("INSERT INTO gastos (item, monto, categoria, fecha, descripcion, innecesario) VALUES (?, ?, ?, ?, ?, ?)", 
-                  (g['item'], g['monto'], g['categoria'], fecha_actual, g['descripcion'], g['innecesario']))
-    conn.commit()
-    conn.close()
+    with engine.connect() as conn:
+        for g in gastos_lista:
+            conn.execute(sqlalchemy.text("""
+                INSERT INTO gastos (item, monto, categoria, fecha, descripcion, innecesario) 
+                VALUES (:item, :monto, :categoria, :fecha, :descripcion, :innecesario)
+            """), {
+                "item": g['item'], 
+                "monto": g['monto'], 
+                "categoria": g['categoria'], 
+                "fecha": fecha_actual, 
+                "descripcion": g['descripcion'],
+                "innecesario": g['innecesario']
+            })
+        conn.commit()
 
 def limpiar_bd():
-    conn = sqlite3.connect('mis_gastos.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM gastos")
-    conn.commit()
-    conn.close()
-
-init_db()
+    with engine.connect() as conn:
+        conn.execute(sqlalchemy.text("DELETE FROM gastos"))
+        conn.commit()
 
 # --- PROCESAMIENTO MÚLTIPLE ---
 def procesar_texto_local(texto_multilinea):
@@ -156,7 +159,7 @@ def procesar_texto_local(texto_multilinea):
             "Alimentos": ["super", "supermercado", "comida", "chino", "coto", "carrefour", "dia", "verduleria", "carniceria", "kiosco", "panaderia", "almuerzo", "chori"],
             "Transporte": ["uber", "sube", "taxi", "bondi", "colectivo", "tren", "nafta", "peaje", "viaje"],
             "Salidas/Ocio": ["boliche", "cine", "bar", "cerveza", "cena", "salida", "joda", "entrada", "recital", "juego", "steam", "partido"],
-            "Servicios": ["luz", "gas", "agua", "internet", "telefono", "celular", "edenor", "edesur", "aysa", "netflix", "spotify"],
+            "Servicios": ["luz", "gas", "agua", "internet", "telefono", "celular", "edenor", "edesur", "aysa", "netflix", "spotify", "hosting"],
             "Educación": ["facultad", "fadu", "uba", "apuntes", "materiales", "cuota", "maqueta"],
             "Impuestos": ["afip", "monotributo", "impuesto", "abl"]
         }
@@ -248,7 +251,7 @@ if st.sidebar.button("Cerrar Sesión"):
 
 gastos_texto = st.text_area(
     "Escribí tus gastos (un renglón por gasto):",
-    placeholder="Ej:\n5000 chori en Lanús - innecesario\n15000 materiales fadu - cartones",
+    placeholder="Ej:\n5000 chori en Lanús - innecesario\n15000 materiales fadu - cartones para la maqueta",
     height=120,
 )
 
@@ -260,14 +263,13 @@ if st.button("Procesar Gastos", type="primary"):
         
         if len(nuevos_gastos) > 0:
             guardar_gastos(nuevos_gastos)
-            st.success(f"¡{len(nuevos_gastos)} gasto(s) procesado(s) y guardado(s) al instante!")
+            st.success(f"¡{len(nuevos_gastos)} gasto(s) procesado(s) y guardado(s) en la nube!")
             st.rerun()
         else:
             st.error("No se detectó ningún monto numérico válido en el texto.")
 
 monto_total_gastos = float(df_mostrar["monto"].sum()) if not df_mostrar.empty else 0.0
 
-# --- CÁLCULO INTELIGENTE DEL SALDO Y ALERTA DE AHORROS ---
 presupuesto_gastos = float(ingreso_mensual) - float(ahorro_mensual)
 saldo_restante_raw = presupuesto_gastos - monto_total_gastos
 
@@ -284,13 +286,10 @@ if not df.empty:
 else:
     st.subheader("💵 Balance Actual")
 
-# Alertas visuales
 if not df_mostrar.empty:
-    # 1. Alerta si se metió mano en los ahorros
     if exceso_ahorros > 0:
         st.error(f"⚠️ **¡Alerta de Ahorros!** Te pasaste por **${exceso_ahorros:,.2f}** de tu presupuesto disponible y tuviste que consumir parte del dinero que ibas a ahorrar.")
     
-    # 2. Alerta de gastos innecesarios
     df_innecesarios = df_mostrar[df_mostrar['innecesario'] == 1]
     total_innecesario = float(df_innecesarios['monto'].sum()) if not df_innecesarios.empty else 0.0
     if total_innecesario > 0:
@@ -301,10 +300,7 @@ with st.container(border=True):
     col_met1.metric(label="Ingreso", value=f"${ingreso_mensual:,.2f}")
     col_met2.metric(label="Ahorro Destinado", value=f"${ahorro_mensual:,.2f}")
     col_met3.metric(label="Total Gastado", value=f"${monto_total_gastos:,.2f}")
-    
-    col_met4.metric(
-        label="Saldo Real Disponible", value=f"${saldo_restante:,.2f}"
-    )
+    col_met4.metric(label="Saldo Real Disponible", value=f"${saldo_restante:,.2f}")
 
 if not df_mostrar.empty:
     st.markdown("---")
@@ -341,5 +337,7 @@ if not df_mostrar.empty:
                     "Alerta": "Innecesario"
                 },
                 hide_index=True, 
+                use_container_width=True,
+            )
                 use_container_width=True,
             )
