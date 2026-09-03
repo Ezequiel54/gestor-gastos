@@ -16,7 +16,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_URL = "postgresql://postgres:TU_CONTRASENA_REAL@db.jnwhwgzlbbzofizmwsyf.supabase.co:5432/postgres"
+DB_URL = "postgresql://postgres.jnwhwgzlbbzofizmwsyf:Sanson0007.@aws-0-us-west-2.pooler.supabase.com:5432/postgres"
 if DB_URL.startswith("postgres://"):
     DB_URL = DB_URL.replace("postgres://", "postgresql://", 1)
 
