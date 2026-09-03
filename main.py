@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 
 app = FastAPI(title="Finanzas KOVA API")
 
-# Habilita los permisos para que tu web en Netlify pueda hablar con tu servidor Python
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -16,12 +15,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- ¡ATENCIÓN ACÁ! ---
-# Reemplazá este texto entre comillas por tu enlace REAL de Supabase 
-# (el mismo que tenías en los Secrets de Streamlit)
 DB_URL = "postgresql://postgres:TU_CONTRASENA_REAL@db.jnwhwgzlbbzofizmwsyf.supabase.co:5432/postgres"
-
 engine = sqlalchemy.create_engine(DB_URL)
+
+# --- CREAR TABLAS SI NO EXISTEN ---
+def init_db():
+    with engine.connect() as conn:
+        conn.execute(sqlalchemy.text('''
+            CREATE TABLE IF NOT EXISTS gastos (
+                id SERIAL PRIMARY KEY,
+                item TEXT,
+                monto REAL,
+                categoria TEXT,
+                fecha TEXT DEFAULT '',
+                descripcion TEXT DEFAULT '',
+                innecesario INTEGER DEFAULT 0
+            )
+        '''))
+        conn.commit()
+
+init_db()
 
 class GastosInput(BaseModel):
     texto: str
@@ -32,7 +45,6 @@ def procesar_gastos(data: GastosInput):
     gastos_procesados = []
     lineas = texto_multilinea.split('\n')
     
-    # Categorías inteligentes
     categorias = {
         "Alimentos": ["super", "supermercado", "comida", "chino", "coto", "carrefour", "dia", "verduleria", "carniceria", "kiosco", "panaderia", "almuerzo", "chori"],
         "Transporte": ["uber", "sube", "taxi", "bondi", "colectivo", "tren", "nafta", "peaje", "viaje"],
@@ -61,7 +73,6 @@ def procesar_gastos(data: GastosInput):
         item = re.sub(r'[\d\.]+', '', texto_principal).strip().capitalize()
         if not item: item = "Gasto general"
 
-        # Asignar categoría detectando palabras clave
         categoria_asignada = "Otros"
         for cat, palabras in categorias.items():
             if any(palabra in texto_min for palabra in palabras):
@@ -76,7 +87,6 @@ def procesar_gastos(data: GastosInput):
     if not gastos_procesados:
         raise HTTPException(status_code=400, detail="No se detectaron gastos válidos.")
     
-    # Guardado en Supabase
     fecha_actual = (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y")
     with engine.connect() as conn:
         for g in gastos_procesados:
