@@ -1,6 +1,4 @@
-streamlit
-pandas
-plotly
-openpyxl
-psycopg2-binary
+fastapi
+uvicorn
 sqlalchemy
+psycopg2-binary
