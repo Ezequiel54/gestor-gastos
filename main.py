@@ -1,8 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import sqlalchemy
 import re
+import io
 import pandas as pd
 from datetime import datetime, timedelta
 
@@ -16,7 +18,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_URL = "postgresql://postgres.jnwhwgzlbbzofizmwsyf:Sanson0007.@aws-0-us-west-2.pooler.supabase.com:5432/postgres"
+DB_URL = "postgresql://postgres.jnwhwgzlbbzofizmwsyf:TU_CONTRASENA_REAL@aws-0-us-west-2.pooler.supabase.com:5432/postgres"
 engine = sqlalchemy.create_engine(DB_URL)
 
 def init_db():
@@ -48,6 +50,23 @@ def init_db():
         '''))
         conn.commit()
 
+        res = conn.execute(sqlalchemy.text("SELECT COUNT(*) FROM public.diccionario_categorias")).fetchone()
+        if res[0] == 0:
+            categorias_default = {
+                "Alimentos": ["super", "supermercado", "comida", "chino", "coto", "carrefour", "dia", "verduleria", "carniceria", "kiosco", "panaderia", "almuerzo", "chori", "coca"],
+                "Transporte": ["uber", "sube", "taxi", "bondi", "colectivo", "tren", "nafta", "peaje", "viaje"],
+                "Salidas/Ocio": ["boliche", "cine", "bar", "cerveza", "cena", "salida", "joda", "entrada", "recital", "juego", "steam", "partido"],
+                "Servicios": ["luz", "gas", "agua", "internet", "telefono", "celular", "edenor", "edesur", "aysa", "netflix", "spotify", "hosting"],
+                "Educación/Estudio": ["facultad", "fadu", "uba", "apuntes", "materiales", "cuota", "maqueta", "libro"],
+                "Impuestos": ["afip", "monotributo", "impuesto", "abl"]
+            }
+            for cat, palabras in categorias_default.items():
+                for palabra in palabras:
+                    conn.execute(sqlalchemy.text(
+                        "INSERT INTO public.diccionario_categorias (categoria, palabra) VALUES (:cat, :pal)"
+                    ), {"cat": cat, "pal": palabra})
+            conn.commit()
+
 init_db()
 
 class GastosInput(BaseModel):
@@ -58,15 +77,46 @@ class PresupuestoInput(BaseModel):
     ingreso: float
     ahorro: float
 
+def cargar_diccionario_db():
+    try:
+        df_dic = pd.read_sql("SELECT categoria, palabra FROM public.diccionario_categorias", con=engine)
+        diccionario = {}
+        for _, row in df_dic.iterrows():
+            cat = row['categoria']
+            if cat not in diccionario:
+                diccionario[cat] = []
+            diccionario[cat].append(row['palabra'])
+        return diccionario
+    except Exception:
+        return {
+            "Alimentos": ["super", "comida", "chori", "coca"],
+            "Transporte": ["uber", "sube", "bondi"],
+            "Educación/Estudio": ["fadu", "uba", "apuntes", "materiales"]
+        }
+
+@app.get("/api/gastos")
+def obtener_gastos(mes: str = None):
+    query = "SELECT id, fecha, item, descripcion, monto, categoria, innecesario FROM public.gastos"
+    df = pd.read_sql(query, con=engine)
+    if mes and not df.empty:
+        df['mes_filtro'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y', errors='coerce').dt.strftime('%Y-%m')
+        df = df[df['mes_filtro'] == mes]
+    if df.empty:
+        return []
+    return df.drop(columns=['mes_filtro'], errors='ignore').to_dict(orient="records")
+
 @app.post("/api/procesar-gastos")
 def procesar_gastos(data: GastosInput):
+    categorias_dinamicas = cargar_diccionario_db()
     gastos_procesados = []
     lineas = data.texto.split('\n')
     
     for linea in lineas:
         if not linea.strip(): continue
+            
         es_innecesario = 1 if re.search(r'innecesari[oa]s?', linea, re.IGNORECASE) else 0
         linea_limpia = re.sub(r'innecesari[oa]s?', '', linea, flags=re.IGNORECASE).replace('  ', ' ').strip()
+        
         partes = linea_limpia.split('-', 1)
         texto_principal = partes[0].strip()
         descripcion = partes[1].strip().capitalize() if len(partes) > 1 else ""
@@ -79,8 +129,14 @@ def procesar_gastos(data: GastosInput):
         item = re.sub(r'[\d\.]+', '', texto_principal).strip().capitalize()
         if not item: item = "Gasto general"
 
+        categoria_asignada = "Otros"
+        for cat, palabras in categorias_dinamicas.items():
+            if any(palabra in texto_min for palabra in palabras):
+                categoria_asignada = cat
+                break
+        
         gastos_procesados.append({
-            "item": item, "monto": monto, "categoria": "Otros", 
+            "item": item, "monto": monto, "categoria": categoria_asignada, 
             "descripcion": descripcion, "innecesario": es_innecesario
         })
     
@@ -98,14 +154,15 @@ def procesar_gastos(data: GastosInput):
                 "fecha": fecha_actual, "descripcion": g['descripcion'], "innecesario": g['innecesario']
             })
         conn.commit()
+
     return {"status": "success", "procesados": len(gastos_procesados)}
 
-@app.get("/api/balance")
-def obtener_balance():
+@app.delete("/api/gastos/{gasto_id}")
+def eliminar_gasto(gasto_id: int):
     with engine.connect() as conn:
-        res = conn.execute(sqlalchemy.text("SELECT sum(monto) FROM public.gastos")).fetchone()
-        total_gastado = float(res[0]) if res[0] else 0.0
-    return {"total_gastado": total_gastado}
+        conn.execute(sqlalchemy.text("DELETE FROM public.gastos WHERE id = :id"), {"id": gasto_id})
+        conn.commit()
+    return {"status": "success"}
 
 @app.get("/api/presupuesto/{mes_anio}")
 def obtener_presupuesto(mes_anio: str):
@@ -128,3 +185,16 @@ def guardar_presupuesto(data: PresupuestoInput):
         '''), {"ma": data.mes_anio, "ing": data.ingreso, "aho": data.ahorro})
         conn.commit()
     return {"status": "success"}
+
+@app.get("/api/exportar-excel")
+def exportar_excel():
+    df = pd.read_sql("SELECT fecha, item, descripcion, monto, categoria, innecesario FROM public.gastos", con=engine)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Gastos KOVA')
+    output.seek(0)
+    return StreamingResponse(
+        output,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': 'attachment; filename="gastos_kova.xlsx"'}
+    )
