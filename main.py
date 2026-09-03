@@ -186,7 +186,9 @@ def guardar_presupuesto(data: PresupuestoInput):
             INSERT INTO public.presupuestos_mensuales (mes_anio, ingreso, ahorro)
             VALUES (:ma, :ing, :aho)
             ON CONFLICT (mes_anio) 
-            DO UPDATE SET ingreso = EXCLUDED.ingreso, ahorro = EXCLUDED.ahorro
+            DO UPDATE SET 
+                ingreso = COALESCE(presupuestos_mensuales.ingreso, 0) + EXCLUDED.ingreso, 
+                ahorro = COALESCE(presupuestos_mensuales.ahorro, 0) + EXCLUDED.ahorro
         '''), {"ma": data.mes_anio, "ing": data.ingreso, "aho": data.ahorro})
         conn.commit()
     return {"status": "success"}
