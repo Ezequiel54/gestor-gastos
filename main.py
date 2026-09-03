@@ -18,7 +18,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_URL = "postgresql://postgres.jnwhwgzlbbzofizmwsyf:TU_CONTRASENA_REAL@aws-0-us-west-2.pooler.supabase.com:5432/postgres"
+DB_URL = "postgresql://postgres.jnwhwgzlbbzofizmwsyf:Sanson0007.@aws-0-us-west-2.pooler.supabase.com:5432/postgres"
 engine = sqlalchemy.create_engine(DB_URL)
 
 def init_db():
