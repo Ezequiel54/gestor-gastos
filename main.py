@@ -96,14 +96,19 @@ def cargar_diccionario_db():
 
 @app.get("/api/gastos")
 def obtener_gastos(mes: str = None):
-    query = "SELECT id, fecha, item, descripcion, monto, categoria, innecesario FROM public.gastos"
-    df = pd.read_sql(query, con=engine)
-    if mes and not df.empty:
-        df['mes_filtro'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y', errors='coerce').dt.strftime('%Y-%m')
-        df = df[df['mes_filtro'] == mes]
-    if df.empty:
+    try:
+        query = "SELECT id, fecha, item, descripcion, monto, categoria, innecesario FROM public.gastos"
+        df = pd.read_sql(query, con=engine)
+        if df.empty:
+            return []
+        if mes:
+            df['mes_filtro'] = pd.to_datetime(df['fecha'], format='%d/%m/%Y', errors='coerce').dt.strftime('%Y-%m')
+            df = df[df['mes_filtro'] == mes]
+        if df.empty:
+            return []
+        return df.drop(columns=['mes_filtro'], errors='ignore').to_dict(orient="records")
+    except Exception as e:
         return []
-    return df.drop(columns=['mes_filtro'], errors='ignore').to_dict(orient="records")
 
 @app.post("/api/procesar-gastos")
 def procesar_gastos(data: GastosInput):
