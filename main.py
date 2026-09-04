@@ -87,13 +87,22 @@ def cargar_diccionario_db():
                 diccionario[cat] = []
             diccionario[cat].append(row['palabra'])
         return diccionario
-    except Exception:
-        return {
-            "Alimentos": ["super", "comida", "chori", "coca"],
-            "Transporte": ["uber", "sube", "bondi"],
-            "Educación/Estudio": ["fadu", "uba", "apuntes", "materiales"]
-        }
-
+   def clasificar_gasto(item: str) -> str:
+    item_lower = item.lower()
+    categorias = {
+        "Alimentos": ["super", "carne", "verdura", "comida", "kiosco", "chori", "empanada", "pizza", "desayuno"],
+        "Transporte": ["bondi", "tren", "subte", "uber", "cabify", "nafta", "peaje", "carga"],
+        "Educacion": ["apunte", "fadu", "uba", "cuota", "curso", "libro", "matricula"],
+        "Ocio": ["cine", "salida", "juego", "steam", "boliche", "cerveza"],
+        "Servicios": ["luz", "agua", "internet", "celular", "gas", "expensas"],
+        "Salud": ["farmacia", "medico", "pastillas", "obra social"],
+        "Deudas/Tarjetas": ["tarjeta", "deuda", "cuota", "prestamo", "visa", "mastercard", "mp"]
+    }
+    
+    for categoria, palabras_clave in categorias.items():
+        if any(palabra in item_lower for palabra in palabras_clave):
+            return categoria
+    return "Otros"
 @app.get("/api/gastos")
 def obtener_gastos(mes: str = None):
     try:
